@@ -6,7 +6,7 @@ use std::{io, sync::Arc};
 
 use async_trait::async_trait;
 use bytes::BytesMut;
-use rustls_pemfile::{certs, pkcs8_private_keys};
+use rustls_pemfile::{certs, pkcs8_private_keys, rsa_private_keys};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use std::net::ToSocketAddrs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -212,11 +212,17 @@ fn load_certs(path: &Path) -> io::Result<Vec<CertificateDer<'static>>> {
     certs(&mut BufReader::new(File::open(path)?)).collect()
 }
 
-fn load_keys(path: &Path) -> io::Result<PrivateKeyDer<'static>> {
-    pkcs8_private_keys(&mut BufReader::new(File::open(path)?))
-        .next()
-        .unwrap()
-        .map(Into::into)
+fn load_keys(path: &std::path::Path) -> io::Result<PrivateKeyDer<'static>> {
+    match rsa_private_keys(&mut BufReader::new(File::open(path)?))
+        .next() {
+        Ok(rsa_private_key) => rsa_private_key.map(Into::into),
+        Err(_) => {
+            pkcs8_private_keys(&mut BufReader::new(File::open(path)?))
+                .next()
+                .unwrap()
+                .map(Into::into)
+        }
+    }
 }
 
 #[async_trait]

@@ -32,7 +32,7 @@ impl<'a, T: BrokerConnection + Clone + Debug> ClusterMetadata<T> {
         client_id: String,
         topics: Vec<String>,
     ) -> Result<ClusterMetadata<T>> {
-        // tracing::info!("Conencting to cluster at {}", bootstrap_addrs.join(","));
+        // tracing::info!("Connecting to cluster at {}", bootstrap_addrs.join(","));
         let mut metadata = ClusterMetadata {
             connection_params: connection_params.clone(),
             controller_id: -1,

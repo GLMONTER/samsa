@@ -15,7 +15,7 @@
 //!
 //! The client will likely need to maintain a connection to multiple brokers,
 //! as data is partitioned and the clients will need to talk to the server
-//! that has their data. However it should not generally be necessary to
+//! that has their data. However, it should not generally be necessary to
 //! maintain multiple connections to a single broker from a single client
 //! instance (i.e. connection pooling).
 //!
@@ -44,6 +44,7 @@ use bytes::BytesMut;
 pub mod sasl;
 pub mod tcp;
 pub mod tls;
+pub mod proxy;
 
 /// Address of a broker
 #[derive(Clone, Debug, PartialEq)]

@@ -676,6 +676,7 @@ pub mod prelude {
         sasl::{do_sasl_v2, SaslConfig},
         tcp::{SaslTcpConfig, SaslTcpConnection, TcpConnection},
         tls::{SaslTlsConfig, SaslTlsConnection, TlsConnection, TlsConnectionOptions},
+        proxy::{ProxyTlsConnectionOptions, ProxyConfig, ProxyTlsConfig, ProxyTlsConnection, ProxyTcpConnection},
         BrokerAddress, BrokerConnection,
     };
     pub use crate::producer::{produce, ProduceMessage, Producer};
