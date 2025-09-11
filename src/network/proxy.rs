@@ -573,8 +573,9 @@ fn load_certs(path: &std::path::Path) -> io::Result<Vec<CertificateDer<'static>>
 fn load_keys(path: &std::path::Path) -> io::Result<PrivateKeyDer<'static>> {
     match rsa_private_keys(&mut BufReader::new(File::open(path)?))
         .next() {
-        Ok(rsa_private_key) => rsa_private_key.map(Into::into),
-        Err(_) => {
+        Some(Ok(rsa_private_key)) => Ok(rsa_private_key.into()),
+        Some(Err(e)) => Err(e),
+        None => {
             pkcs8_private_keys(&mut BufReader::new(File::open(path)?))
                 .next()
                 .unwrap()
