@@ -32,7 +32,9 @@ serde = { version = "1.0.193", optional = true }
 serde_derive = { version = "1.0.193", optional = true }
 serde_json = "1.0.108"
 tokio = { version = "1.36.0", features = ['full'] }
-tokio-rustls = "0.26.0"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-webpki = { version = "0.103", default-features = false, features = ["ring", "std"] }
 tokio-stream = "0.1.14"
 tracing = "0.1.37"
 tracing-subscriber = "0.3.17"
