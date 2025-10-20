@@ -82,10 +82,9 @@ impl TlsConnection {
         for broker_option in options.broker_options.iter() {
             let addr = (broker_option.host.as_str(), broker_option.port)
                 .to_socket_addrs()
-                .unwrap()
+                .map_err(|e| Error::from(Error::IoError(ErrorKind::NotFound)))?
                 .next()
-                .ok_or_else(|| Error::IoError(ErrorKind::NotFound))
-                .unwrap();
+                .ok_or_else(|| Error::IoError(ErrorKind::NotFound))?;
 
             tracing::debug!("Connecting to {}", broker_option.host);
             let certs = load_certs(&options.cert).map_err(|e| Error::IoError(e.kind()))?;
