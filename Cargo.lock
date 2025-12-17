@@ -1386,6 +1386,7 @@ dependencies = [
  "criterion",
  "flate2",
  "futures",
+ "log",
  "lz4_flex",
  "nom",
  "nombytes",

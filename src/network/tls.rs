@@ -3,7 +3,8 @@ use std::io::BufReader;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::{io, sync::Arc};
-
+use std::error::Error;
+use std::io::ErrorKind::Other;
 use async_trait::async_trait;
 use bytes::BytesMut;
 use rustls_pemfile::{certs, pkcs8_private_keys, rsa_private_keys};
@@ -16,7 +17,7 @@ use tokio_rustls::{client::TlsStream, rustls, TlsConnector};
 
 use crate::{
     encode::ToByte,
-    error::{Error, Result},
+    error::{Result},
 };
 
 use super::sasl::do_sasl_v2;
@@ -66,7 +67,7 @@ impl TlsConnection {
             "Starting connection to {} brokers",
             options.broker_options.len()
         );
-        let mut propagated_err: Option<Error> = None;
+        let mut propagated_err: Option<crate::error::Error> = None;
 
         // need to figure out what this is
         let mut root_cert_store = rustls::RootCertStore::empty();
@@ -82,13 +83,13 @@ impl TlsConnection {
         for broker_option in options.broker_options.iter() {
             let addr = (broker_option.host.as_str(), broker_option.port)
                 .to_socket_addrs()
-                .map_err(|e| Error::from(Error::IoError(ErrorKind::NotFound)))?
+                .map_err(|e| crate::error::Error::from(crate::error::Error::IoError(ErrorKind::NotFound)))?
                 .next()
-                .ok_or_else(|| Error::IoError(ErrorKind::NotFound))?;
+                .ok_or_else(|| crate::error::Error::IoError(ErrorKind::NotFound))?;
 
             tracing::debug!("Connecting to {}", broker_option.host);
-            let certs = load_certs(&options.cert).map_err(|e| Error::IoError(e.kind()))?;
-            let key = load_keys(&options.key).map_err(|e| Error::IoError(e.kind()))?;
+            let certs = load_certs(&options.cert).map_err(|e| crate::error::Error::IoError(e.kind()))?;
+            let key = load_keys(&options.key).map_err(|e| crate::error::Error::IoError(e.kind()))?;
             tracing::debug!("keys ready");
 
             match TcpStream::connect(addr).await {
@@ -104,14 +105,23 @@ impl TlsConnection {
                     tracing::debug!("tls connected");
 
                     let domain = rustls_pki_types::ServerName::try_from(broker_option.host.clone())
-                        .map_err(|_| Error::IoError(ErrorKind::InvalidInput))?
+                        .map_err(|_| crate::error::Error::IoError(ErrorKind::InvalidInput))?
                         .to_owned();
                     tracing::debug!("dns ready");
 
-                    let stream = connector
+                    let stream = match connector
                         .connect(domain, s)
-                        .await
-                        .map_err(|e| Error::IoError(e.kind()))?;
+                        .await {
+                        Ok(s) => s,
+                        Err(e) =>  {
+                            if let Some(err) = e.source() {
+                                log::error!("failed to connect to broker over TLS: {:?}", err);
+                            } else {
+                                log::error!("failed to connect to broker over TLS: {}", e);
+                            }
+                            return Err(crate::error::Error::IoError(Other))
+                        }
+                    };
                     tracing::debug!("tls connected to tcp");
 
                     return Ok(Self {
@@ -119,7 +129,7 @@ impl TlsConnection {
                     });
                 }
                 Err(e) => {
-                    propagated_err = Some(Error::IoError(e.kind()));
+                    propagated_err = Some(crate::error::Error::IoError(e.kind()));
                 }
             }
         }
@@ -129,7 +139,7 @@ impl TlsConnection {
             return Err(e);
         }
 
-        Err(Error::IoError(ErrorKind::NotFound))
+        Err(crate::error::Error::IoError(ErrorKind::NotFound))
     }
 
     /// Serialize a given request and send to Kafka/Redpanda broker.
@@ -165,7 +175,7 @@ impl TlsConnection {
             .await
             .write_all(&buffer)
             .await
-            .map_err(|e| Error::IoError(e.kind()))?;
+            .map_err(|e| crate::error::Error::IoError(e.kind()))?;
 
         Ok(())
     }
@@ -191,7 +201,7 @@ impl TlsConnection {
         let length = stream
             .read_u32()
             .await
-            .map_err(|e| Error::IoError(e.kind()))?;
+            .map_err(|e| crate::error::Error::IoError(e.kind()))?;
 
         tracing::trace!("Reading {} bytes", length);
         let mut buffer = BytesMut::zeroed(length as usize);
@@ -200,7 +210,7 @@ impl TlsConnection {
         stream
             .read_exact(&mut buffer)
             .await
-            .map_err(|e| Error::IoError(e.kind()))?;
+            .map_err(|e| crate::error::Error::IoError(e.kind()))?;
         tracing::trace!("Read {:?}", buffer);
 
         Ok(buffer)
