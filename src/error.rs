@@ -33,6 +33,7 @@ pub enum Error {
     IncorrectConnectionUsage,
     InvalidSaslMechanism,
     SaslAuthFailed(String),
+    TaskCancelled(String),
 }
 
 impl fmt::Display for Error {
