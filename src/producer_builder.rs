@@ -187,27 +187,48 @@ fn into_produce_stream(
 async fn producer<T: BrokerConnection + Clone + Debug + Send + 'static>(
     stream: impl Stream<Item = Vec<ProduceMessage>> + Send + 'static,
     output_sender: UnboundedSender<Vec<Option<ProduceResponse>>>,
-    cluster_metadata: ClusterMetadata<T>,
+    mut cluster_metadata: ClusterMetadata<T>,  // Make mutable
     produce_params: ProduceParams,
     attributes: Attributes,
 ) {
     tokio::pin!(stream);
-    while let Some(messages) = stream.next().await {
-        match flush_producer(
-            &cluster_metadata,
-            &produce_params,
-            messages,
-            attributes.clone(),
-        )
-        .await
-        {
-            Err(err) => {
-                tracing::error!("Error in producer agent {:?}", err);
-            }
-            Ok(r) => {
-                if let Err(err) = output_sender.send(r) {
-                    tracing::error!("Error sending results from producer agent {:?}", err);
+
+    let mut keepalive_interval = tokio::time::interval(Duration::from_secs(60));
+    keepalive_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            Some(messages) = stream.next() => {
+                match flush_producer(
+                    &cluster_metadata,
+                    &produce_params,
+                    messages,
+                    attributes.clone(),
+                )
+                .await
+                {
+                    Err(err) => {
+                        tracing::error!("Error in producer agent {:?}", err);
+                    }
+                    Ok(r) => {
+                        if let Err(err) = output_sender.send(r) {
+                            tracing::error!("Error sending results from producer agent {:?}", err);
+                        }
+                    }
                 }
+            }
+
+            _ = keepalive_interval.tick() => {
+                if let Some((_id, conn)) = cluster_metadata.broker_connections.iter().next() {
+                    let conn_clone = conn.clone();
+                    if let Err(e) = cluster_metadata.fetch(conn_clone).await {
+                        log::error!("broker metadata refresh failed: {:?}", e);
+                    }
+                }
+            }
+
+            else => {
+                break;
             }
         }
     }

@@ -104,6 +104,7 @@ impl ProxyTcpConnection {
             .write_all(connect_request.as_bytes())
             .await
             .map_err(|e| Error::IoError(e.kind()))?;
+        stream.flush().await.map_err(|e| Error::IoError(e.kind()))?;
 
         tracing::debug!("Sent CONNECT request to proxy");
 
@@ -414,12 +415,9 @@ impl ProxyTlsConnection {
         size.encode(&mut &mut buffer[..])?;
 
         tracing::trace!("Sending bytes {}", buffer.len());
-        self.stream
-            .lock()
-            .await
-            .write_all(&buffer)
-            .await
-            .map_err(|e| Error::IoError(e.kind()))?;
+        let mut stream = self.stream.lock().await;
+        stream.write_all(&buffer).await.map_err(|e| Error::IoError(e.kind()))?;
+        stream.flush().await.map_err(|e| Error::IoError(e.kind()))?;
 
         Ok(())
     }

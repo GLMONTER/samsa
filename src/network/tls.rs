@@ -170,12 +170,9 @@ impl TlsConnection {
         size.encode(&mut &mut buffer[..])?;
 
         tracing::trace!("Sending bytes {}", buffer.len());
-        self.stream
-            .lock()
-            .await
-            .write_all(&buffer)
-            .await
-            .map_err(|e| crate::error::Error::IoError(e.kind()))?;
+        let mut stream = self.stream.lock().await;
+        stream.write_all(&buffer).await.map_err(|e| crate::error::Error::IoError(e.kind()))?;
+        stream.flush().await.map_err(|e| crate::error::Error::IoError(e.kind()))?;
 
         Ok(())
     }
