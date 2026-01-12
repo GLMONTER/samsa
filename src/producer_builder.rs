@@ -187,7 +187,7 @@ fn into_produce_stream(
 async fn producer<T: BrokerConnection + Clone + Debug + Send + 'static>(
     stream: impl Stream<Item = Vec<ProduceMessage>> + Send + 'static,
     output_sender: UnboundedSender<Vec<Option<ProduceResponse>>>,
-    mut cluster_metadata: ClusterMetadata<T>,  // Make mutable
+    mut cluster_metadata: ClusterMetadata<T>,
     produce_params: ProduceParams,
     attributes: Attributes,
 ) {
