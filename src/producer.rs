@@ -166,24 +166,26 @@ pub(crate) async fn flush_producer<T: BrokerConnection + Clone + Debug + Send + 
             }
             Err(join_error) if join_error.is_cancelled() => {
                 tracing::warn!(
-                "producer task cancelled, client probably getting dropped: {:?}",
-                join_error
-            );
+                    "producer task cancelled, client probably getting dropped: {:?}",
+                    join_error
+                );
                 return Err(Error::TaskCancelled(
-                    "producer task cancelled, client probably getting dropped".to_string()
+                    "producer task cancelled, client probably getting dropped".to_string(),
                 ));
             }
             Err(join_error) if join_error.is_panic() => {
                 tracing::error!("producer task panicked: {:?}", join_error);
-                return Err(Error::TaskCancelled(
-                    format!("producer task panicked: {}", join_error)
-                ));
+                return Err(Error::TaskCancelled(format!(
+                    "producer task panicked: {}",
+                    join_error
+                )));
             }
             Err(join_error) => {
                 tracing::error!("producer task join error: {:?}", join_error);
-                return Err(Error::TaskCancelled(
-                    format!("producer task join error: {}", join_error)
-                ));
+                return Err(Error::TaskCancelled(format!(
+                    "producer task join error: {}",
+                    join_error
+                )));
             }
         }
     }

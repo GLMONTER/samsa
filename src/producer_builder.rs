@@ -198,22 +198,29 @@ async fn producer<T: BrokerConnection + Clone + Debug + Send + 'static>(
 
     loop {
         tokio::select! {
-            Some(messages) = stream.next() => {
-                match flush_producer(
-                    &cluster_metadata,
-                    &produce_params,
-                    messages,
-                    attributes.clone(),
-                )
-                .await
-                {
-                    Err(err) => {
-                        tracing::error!("Error in producer agent {:?}", err);
-                    }
-                    Ok(r) => {
-                        if let Err(err) = output_sender.send(r) {
-                            tracing::error!("Error sending results from producer agent {:?}", err);
+            result = stream.next() => {
+                match result {
+                    Some(messages) => {
+                        match flush_producer(
+                            &cluster_metadata,
+                            &produce_params,
+                            messages,
+                            attributes.clone(),
+                        )
+                        .await
+                        {
+                            Err(err) => {
+                                tracing::error!("Error in producer agent {:?}", err);
+                            }
+                            Ok(r) => {
+                                if let Err(err) = output_sender.send(r) {
+                                    tracing::error!("Error sending results from producer agent {:?}", err);
+                                }
+                            }
                         }
+                    }
+                    None => {
+                        break;
                     }
                 }
             }
@@ -225,10 +232,6 @@ async fn producer<T: BrokerConnection + Clone + Debug + Send + 'static>(
                         log::error!("broker metadata refresh failed: {:?}", e);
                     }
                 }
-            }
-
-            else => {
-                break;
             }
         }
     }

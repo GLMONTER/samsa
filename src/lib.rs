@@ -673,10 +673,13 @@ pub mod prelude {
     pub use crate::error::{Error, KafkaCode, Result};
     pub use crate::metadata::ClusterMetadata;
     pub use crate::network::{
+        proxy::{
+            ProxyConfig, ProxyTcpConnection, ProxyTlsConfig, ProxyTlsConnection,
+            ProxyTlsConnectionOptions,
+        },
         sasl::{do_sasl_v2, SaslConfig},
         tcp::{SaslTcpConfig, SaslTcpConnection, TcpConnection},
         tls::{SaslTlsConfig, SaslTlsConnection, TlsConnection, TlsConnectionOptions},
-        proxy::{ProxyTlsConnectionOptions, ProxyConfig, ProxyTlsConfig, ProxyTlsConnection, ProxyTcpConnection},
         BrokerAddress, BrokerConnection,
     };
     pub use crate::producer::{produce, ProduceMessage, Producer};

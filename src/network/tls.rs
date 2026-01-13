@@ -1,24 +1,21 @@
-use std::fs::File;
-use std::io::BufReader;
-use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
-use std::{io, sync::Arc};
-use std::error::Error;
-use std::io::ErrorKind::Other;
 use async_trait::async_trait;
 use bytes::BytesMut;
 use rustls_pemfile::{certs, pkcs8_private_keys, rsa_private_keys};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
+use std::error::Error;
+use std::fs::File;
+use std::io::BufReader;
+use std::io::ErrorKind;
+use std::io::ErrorKind::Other;
 use std::net::ToSocketAddrs;
+use std::path::{Path, PathBuf};
+use std::{io, sync::Arc};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio_rustls::{client::TlsStream, rustls, TlsConnector};
 
-use crate::{
-    encode::ToByte,
-    error::{Result},
-};
+use crate::{encode::ToByte, error::Result};
 
 use super::sasl::do_sasl_v2;
 use super::sasl::SaslConfig;
@@ -83,13 +80,17 @@ impl TlsConnection {
         for broker_option in options.broker_options.iter() {
             let addr = (broker_option.host.as_str(), broker_option.port)
                 .to_socket_addrs()
-                .map_err(|e| crate::error::Error::from(crate::error::Error::IoError(ErrorKind::NotFound)))?
+                .map_err(|e| {
+                    crate::error::Error::from(crate::error::Error::IoError(ErrorKind::NotFound))
+                })?
                 .next()
                 .ok_or_else(|| crate::error::Error::IoError(ErrorKind::NotFound))?;
 
             tracing::debug!("Connecting to {}", broker_option.host);
-            let certs = load_certs(&options.cert).map_err(|e| crate::error::Error::IoError(e.kind()))?;
-            let key = load_keys(&options.key).map_err(|e| crate::error::Error::IoError(e.kind()))?;
+            let certs =
+                load_certs(&options.cert).map_err(|e| crate::error::Error::IoError(e.kind()))?;
+            let key =
+                load_keys(&options.key).map_err(|e| crate::error::Error::IoError(e.kind()))?;
             tracing::debug!("keys ready");
 
             match TcpStream::connect(addr).await {
@@ -109,17 +110,15 @@ impl TlsConnection {
                         .to_owned();
                     tracing::debug!("dns ready");
 
-                    let stream = match connector
-                        .connect(domain, s)
-                        .await {
+                    let stream = match connector.connect(domain, s).await {
                         Ok(s) => s,
-                        Err(e) =>  {
+                        Err(e) => {
                             if let Some(err) = e.source() {
                                 log::error!("failed to connect to broker over TLS: {:?}", err);
                             } else {
                                 log::error!("failed to connect to broker over TLS: {}", e);
                             }
-                            return Err(crate::error::Error::IoError(Other))
+                            return Err(crate::error::Error::IoError(Other));
                         }
                     };
                     tracing::debug!("tls connected to tcp");
@@ -171,8 +170,14 @@ impl TlsConnection {
 
         tracing::trace!("Sending bytes {}", buffer.len());
         let mut stream = self.stream.lock().await;
-        stream.write_all(&buffer).await.map_err(|e| crate::error::Error::IoError(e.kind()))?;
-        stream.flush().await.map_err(|e| crate::error::Error::IoError(e.kind()))?;
+        stream
+            .write_all(&buffer)
+            .await
+            .map_err(|e| crate::error::Error::IoError(e.kind()))?;
+        stream
+            .flush()
+            .await
+            .map_err(|e| crate::error::Error::IoError(e.kind()))?;
 
         Ok(())
     }
@@ -219,16 +224,13 @@ fn load_certs(path: &Path) -> io::Result<Vec<CertificateDer<'static>>> {
 }
 
 fn load_keys(path: &std::path::Path) -> io::Result<PrivateKeyDer<'static>> {
-    match rsa_private_keys(&mut BufReader::new(File::open(path)?))
-        .next() {
+    match rsa_private_keys(&mut BufReader::new(File::open(path)?)).next() {
         Some(Ok(rsa_private_key)) => Ok(rsa_private_key.into()),
         Some(Err(e)) => Err(e),
-        None => {
-            pkcs8_private_keys(&mut BufReader::new(File::open(path)?))
-                .next()
-                .unwrap()
-                .map(Into::into)
-        }
+        None => pkcs8_private_keys(&mut BufReader::new(File::open(path)?))
+            .next()
+            .unwrap()
+            .map(Into::into),
     }
 }
 #[async_trait]

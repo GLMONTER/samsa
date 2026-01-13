@@ -58,8 +58,12 @@ impl ProxyTcpConnection {
         let mut propagated_err: Option<Error> = None;
 
         for broker_addr in config.broker_options.iter() {
-            tracing::debug!("Connecting to {} through proxy {}:{}",
-                           broker_addr.host, config.proxy.host, config.proxy.port);
+            tracing::debug!(
+                "Connecting to {} through proxy {}:{}",
+                broker_addr.host,
+                config.proxy.host,
+                config.proxy.port
+            );
 
             match Self::connect_through_proxy(&config.proxy, broker_addr).await {
                 Ok(stream) => {
@@ -117,15 +121,17 @@ impl ProxyTcpConnection {
             let mut byte = [0u8; 1];
             match tokio::time::timeout(
                 std::time::Duration::from_secs(10),
-                stream.read_exact(&mut byte)
-            ).await {
+                stream.read_exact(&mut byte),
+            )
+            .await
+            {
                 Ok(Ok(_)) => {
                     response_buffer.push(byte[0]);
 
                     // Check for \r\n\r\n sequence
                     if response_buffer.len() >= 4 {
                         let len = response_buffer.len();
-                        if &response_buffer[len-4..len] == b"\r\n\r\n" {
+                        if &response_buffer[len - 4..len] == b"\r\n\r\n" {
                             headers_complete = true;
                         }
                     }
@@ -168,7 +174,11 @@ impl ProxyTcpConnection {
             return Err(Error::IoError(ErrorKind::PermissionDenied));
         }
 
-        tracing::debug!("Proxy tunnel established to {}:{}", target.host, target.port);
+        tracing::debug!(
+            "Proxy tunnel established to {}:{}",
+            target.host,
+            target.port
+        );
         Ok(stream)
     }
 
@@ -328,7 +338,9 @@ impl ProxyTlsConnection {
             println!("Loading custom CA file: {:?}", cafile);
             let mut pem = BufReader::new(File::open(cafile).map_err(|e| Error::IoError(e.kind()))?);
             for cert in rustls_pemfile::certs(&mut pem) {
-                root_cert_store.add(cert.map_err(|_| Error::IoError(ErrorKind::InvalidData))?).map_err(|_| Error::IoError(ErrorKind::InvalidData))?;
+                root_cert_store
+                    .add(cert.map_err(|_| Error::IoError(ErrorKind::InvalidData))?)
+                    .map_err(|_| Error::IoError(ErrorKind::InvalidData))?;
             }
         } else {
             println!("Using system CA store");
@@ -351,11 +363,16 @@ impl ProxyTlsConnection {
 
             // Establish TCP connection through proxy
             println!("About to call connect_through_proxy");
-            let tcp_stream = match ProxyTcpConnection::connect_through_proxy(&options.proxy, broker_option).await {
+            let tcp_stream = match ProxyTcpConnection::connect_through_proxy(
+                &options.proxy,
+                broker_option,
+            )
+            .await
+            {
                 Ok(stream) => {
                     println!("Proxy connection successful!");
                     stream
-                },
+                }
                 Err(e) => {
                     println!("Proxy connection failed: {:?}", e);
                     propagated_err = Some(e);
@@ -381,7 +398,10 @@ impl ProxyTlsConnection {
                 .map_err(|_| Error::IoError(ErrorKind::InvalidInput))?
                 .to_owned();
 
-            println!("Starting TLS handshake with ServerName: {}", broker_option.host);
+            println!(
+                "Starting TLS handshake with ServerName: {}",
+                broker_option.host
+            );
 
             match connector.connect(domain, tcp_stream).await {
                 Ok(tls_stream) => {
@@ -416,7 +436,10 @@ impl ProxyTlsConnection {
 
         tracing::trace!("Sending bytes {}", buffer.len());
         let mut stream = self.stream.lock().await;
-        stream.write_all(&buffer).await.map_err(|e| Error::IoError(e.kind()))?;
+        stream
+            .write_all(&buffer)
+            .await
+            .map_err(|e| Error::IoError(e.kind()))?;
         stream.flush().await.map_err(|e| Error::IoError(e.kind()))?;
 
         Ok(())
@@ -499,7 +522,7 @@ impl BrokerConnection for SaslProxyTcpConnection {
             &p.sasl_config.client_id,
             p.sasl_config.clone(),
         )
-            .await?;
+        .await?;
         Ok(Self { conn })
     }
 
@@ -546,7 +569,7 @@ impl BrokerConnection for SaslProxyTlsConnection {
             &p.sasl_config.client_id,
             p.sasl_config.clone(),
         )
-            .await?;
+        .await?;
         Ok(Self { conn })
     }
 
@@ -569,15 +592,12 @@ fn load_certs(path: &std::path::Path) -> io::Result<Vec<CertificateDer<'static>>
 }
 
 fn load_keys(path: &std::path::Path) -> io::Result<PrivateKeyDer<'static>> {
-    match rsa_private_keys(&mut BufReader::new(File::open(path)?))
-        .next() {
+    match rsa_private_keys(&mut BufReader::new(File::open(path)?)).next() {
         Some(Ok(rsa_private_key)) => Ok(rsa_private_key.into()),
         Some(Err(e)) => Err(e),
-        None => {
-            pkcs8_private_keys(&mut BufReader::new(File::open(path)?))
-                .next()
-                .unwrap()
-                .map(Into::into)
-        }
+        None => pkcs8_private_keys(&mut BufReader::new(File::open(path)?))
+            .next()
+            .unwrap()
+            .map(Into::into),
     }
 }
