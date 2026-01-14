@@ -4,7 +4,7 @@ use std::io::ErrorKind;
 use std::net::ToSocketAddrs;
 use std::path::PathBuf;
 use std::{io, sync::Arc};
-
+use std::time::Duration;
 use async_trait::async_trait;
 use bytes::BytesMut;
 use rustls_pemfile::{certs, pkcs8_private_keys, rsa_private_keys};
@@ -329,13 +329,10 @@ pub struct ProxyTlsConnectionOptions {
 
 impl ProxyTlsConnection {
     pub async fn new_(options: ProxyTlsConnectionOptions) -> Result<Self> {
-        println!("ProxyTlsConnection::new_() called");
         let mut propagated_err: Option<Error> = None;
 
-        // Set up root certificates
         let mut root_cert_store = rustls::RootCertStore::empty();
         if let Some(cafile) = &options.tls_config.cafile {
-            println!("Loading custom CA file: {:?}", cafile);
             let mut pem = BufReader::new(File::open(cafile).map_err(|e| Error::IoError(e.kind()))?);
             for cert in rustls_pemfile::certs(&mut pem) {
                 root_cert_store
@@ -343,86 +340,64 @@ impl ProxyTlsConnection {
                     .map_err(|_| Error::IoError(ErrorKind::InvalidData))?;
             }
         } else {
-            println!("Using system CA store");
             root_cert_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         }
 
         for broker_option in options.broker_options.iter() {
-            println!("Attempting to connect to broker: {}", broker_option.host);
+            let certs = load_certs(&options.tls_config.cert)
+                .map_err(|e| Error::IoError(e.kind()))?;
+            let key = load_keys(&options.tls_config.key)
+                .map_err(|e| Error::IoError(e.kind()))?;
 
-            let certs = load_certs(&options.tls_config.cert).map_err(|e| {
-                println!("Failed to load certs: {:?}", e);
-                Error::IoError(e.kind())
-            })?;
-            let key = load_keys(&options.tls_config.key).map_err(|e| {
-                println!("Failed to load key: {:?}", e);
-                Error::IoError(e.kind())
-            })?;
+            // Wrap entire connection process in timeout
+            let connection_result = tokio::time::timeout(
+                Duration::from_secs(30), // Proxy connections may take longer
+                async {
+                    // Establish TCP connection through proxy
+                    let tcp_stream = ProxyTcpConnection::connect_through_proxy(
+                        &options.proxy,
+                        broker_option,
+                    ).await?;
 
-            println!("Certs and keys loaded successfully");
+                    // Set up TLS
+                    let config = rustls::ClientConfig::builder()
+                        .with_root_certificates(root_cert_store.clone())
+                        .with_client_auth_cert(certs, key)
+                        .map_err(|_| Error::IoError(ErrorKind::InvalidData))?;
 
-            // Establish TCP connection through proxy
-            println!("About to call connect_through_proxy");
-            let tcp_stream = match ProxyTcpConnection::connect_through_proxy(
-                &options.proxy,
-                broker_option,
-            )
-            .await
-            {
-                Ok(stream) => {
-                    println!("Proxy connection successful!");
-                    stream
+                    let connector = TlsConnector::from(Arc::new(config));
+                    let domain = rustls_pki_types::ServerName::try_from(broker_option.host.clone())
+                        .map_err(|_| Error::IoError(ErrorKind::InvalidInput))?
+                        .to_owned();
+
+                    // TLS handshake
+                    let tls_stream = connector.connect(domain, tcp_stream).await
+                        .map_err(|e| Error::IoError(e.kind()))?;
+
+                    Ok::<TlsStream<TcpStream>, Error>(tls_stream)
                 }
-                Err(e) => {
-                    println!("Proxy connection failed: {:?}", e);
-                    propagated_err = Some(e);
-                    continue;
-                }
-            };
+            ).await;
 
-            println!("Setting up TLS configuration");
-
-            // Set up TLS with proper ServerName
-            let config = rustls::ClientConfig::builder()
-                .with_root_certificates(root_cert_store.clone())
-                .with_client_auth_cert(certs, key)
-                .map_err(|e| {
-                    println!("Failed to create TLS config: {:?}", e);
-                    Error::IoError(ErrorKind::InvalidData)
-                })?;
-
-            let connector = TlsConnector::from(Arc::new(config));
-
-            // Use the broker hostname for TLS SNI, not the proxy hostname
-            let domain = rustls_pki_types::ServerName::try_from(broker_option.host.clone())
-                .map_err(|_| Error::IoError(ErrorKind::InvalidInput))?
-                .to_owned();
-
-            println!(
-                "Starting TLS handshake with ServerName: {}",
-                broker_option.host
-            );
-
-            match connector.connect(domain, tcp_stream).await {
-                Ok(tls_stream) => {
-                    println!("TLS connection established through proxy");
+            match connection_result {
+                Ok(Ok(tls_stream)) => {
                     return Ok(Self {
                         stream: Arc::new(Mutex::new(tls_stream)),
                     });
                 }
-                Err(e) => {
-                    println!("TLS handshake failed: {:?}", e);
-                    propagated_err = Some(Error::IoError(e.kind()));
+                Ok(Err(e)) => {
+                    propagated_err = Some(e);
+                }
+                Err(_) => {
+                    tracing::error!("Connection timeout for broker {}", broker_option.host);
+                    propagated_err = Some(Error::IoError(ErrorKind::TimedOut));
                 }
             }
         }
 
         if let Some(e) = propagated_err {
-            println!("All connections failed, returning error: {:?}", e);
             return Err(e);
         }
 
-        println!("No brokers to connect to");
         Err(Error::IoError(ErrorKind::NotFound))
     }
 
