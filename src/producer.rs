@@ -385,7 +385,8 @@ impl<T: BrokerConnection + Clone + Debug + Send + Sync + 'static> SyncProducer<T
                         for partition_response in topic_response.partition_responses.iter() {
                             if partition_response.error_code != KafkaCode::None {
                                 //instantly attempt to refresh connection instead of waiting for task so we can start sending message quickly
-                                if let Some((_id, conn)) = metadata.broker_connections.iter().next() {
+                                if let Some((_id, conn)) = metadata.broker_connections.iter().next()
+                                {
                                     let conn_clone = conn.clone();
                                     if let Err(e) = metadata.fetch(conn_clone).await {
                                         log::error!("broker metadata refresh failed: {:?}", e);

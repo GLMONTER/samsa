@@ -9,6 +9,7 @@ use std::io::ErrorKind;
 use std::io::ErrorKind::Other;
 use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use std::{io, sync::Arc};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -169,19 +170,22 @@ impl TlsConnection {
         size.encode(&mut &mut buffer[..])?;
 
         tracing::trace!("Sending bytes {}", buffer.len());
-        let mut stream = self.stream.lock().await;
-        stream
-            .write_all(&buffer)
-            .await
-            .map_err(|e| crate::error::Error::IoError(e.kind()))?;
-        stream
-            .flush()
-            .await
-            .map_err(|e| crate::error::Error::IoError(e.kind()))?;
 
-        Ok(())
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let mut stream = self.stream.lock().await;
+            stream
+                .write_all(&buffer)
+                .await
+                .map_err(|e| crate::error::Error::IoError(e.kind()))?;
+            stream
+                .flush()
+                .await
+                .map_err(|e| crate::error::Error::IoError(e.kind()))?;
+            Ok::<(), crate::error::Error>(())
+        })
+        .await
+        .map_err(|_| crate::error::Error::IoError(ErrorKind::TimedOut))?
     }
-
     /// Receive a response in raw bytes from a Kafka/Redpanda broker.
     ///
     /// Kafka queues up responses on the socket as requests are sent by the client.
@@ -197,25 +201,28 @@ impl TlsConnection {
     /// let response_bytes = conn.receive_response().await?;
     /// ```
     pub async fn receive_response_(&mut self) -> Result<BytesMut> {
-        // figure out the message size
-        let mut stream = self.stream.lock().await;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            // figure out the message size
+            let mut stream = self.stream.lock().await;
 
-        let length = stream
-            .read_u32()
-            .await
-            .map_err(|e| crate::error::Error::IoError(e.kind()))?;
+            let length = stream
+                .read_u32()
+                .await
+                .map_err(|e| crate::error::Error::IoError(e.kind()))?;
 
-        tracing::trace!("Reading {} bytes", length);
-        let mut buffer = BytesMut::zeroed(length as usize);
-        tracing::trace!("before {:?}", buffer);
+            tracing::trace!("Reading {} bytes", length);
+            let mut buffer = BytesMut::zeroed(length as usize);
 
-        stream
-            .read_exact(&mut buffer)
-            .await
-            .map_err(|e| crate::error::Error::IoError(e.kind()))?;
-        tracing::trace!("Read {:?}", buffer);
+            stream
+                .read_exact(&mut buffer)
+                .await
+                .map_err(|e| crate::error::Error::IoError(e.kind()))?;
+            tracing::trace!("Read {:?}", buffer);
 
-        Ok(buffer)
+            Ok::<BytesMut, crate::error::Error>(buffer)
+        })
+        .await
+        .map_err(|_| crate::error::Error::IoError(ErrorKind::TimedOut))?
     }
 }
 

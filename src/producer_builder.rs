@@ -187,14 +187,11 @@ fn into_produce_stream(
 async fn producer<T: BrokerConnection + Clone + Debug + Send + 'static>(
     stream: impl Stream<Item = Vec<ProduceMessage>> + Send + 'static,
     output_sender: UnboundedSender<Vec<Option<ProduceResponse>>>,
-    mut cluster_metadata: ClusterMetadata<T>,
+    cluster_metadata: ClusterMetadata<T>,
     produce_params: ProduceParams,
     attributes: Attributes,
 ) {
     tokio::pin!(stream);
-
-    let mut keepalive_interval = tokio::time::interval(Duration::from_secs(180));
-    keepalive_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
@@ -221,20 +218,6 @@ async fn producer<T: BrokerConnection + Clone + Debug + Send + 'static>(
                     }
                     None => {
                         break;
-                    }
-                }
-            }
-
-            _ = keepalive_interval.tick() => {
-                if let Some((_id, conn)) = cluster_metadata.broker_connections.iter().next() {
-                    let conn_clone = conn.clone();
-                    if let Err(e) = cluster_metadata.fetch(conn_clone).await {
-                        log::error!("broker metadata refresh failed: {:?}, attempting to resync...", e);
-                        if let Err(sync_err) = cluster_metadata.sync().await {
-                            log::error!("failed to resync broker connections: {:?}", sync_err);
-                        } else {
-                            log::info!("resynced broker connections");
-                        }
                     }
                 }
             }
