@@ -316,10 +316,10 @@ impl<T: BrokerConnection + Clone + Debug + Send + Sync + 'static> SyncProducer<T
                 if let Some((_id, conn)) = metadata.broker_connections.iter().next() {
                     let conn_clone = conn.clone();
                     if let Err(e) = metadata.fetch(conn_clone).await {
-                        log::error!("broker metadata refresh failed: {:?}", e);
+                        log::error!("broker metadata refresh failed: {}", e);
                     }
                     if let Err(sync_err) = metadata.sync().await {
-                        log::error!("failed to resync connections: {:?}", sync_err);
+                        log::error!("failed to resync connections: {}", sync_err);
                     }
                 }
             }
@@ -395,13 +395,13 @@ impl<T: BrokerConnection + Clone + Debug + Send + Sync + 'static> SyncProducer<T
                                             let conn_clone = conn.clone();
                                             if let Err(e) = metadata.fetch(conn_clone).await {
                                                 log::error!(
-                                                    "broker metadata refresh failed: {:?}",
+                                                    "broker metadata refresh failed: {}",
                                                     e
                                                 );
                                             }
                                             if let Err(sync_err) = metadata.sync().await {
                                                 log::error!(
-                                                    "failed to resync connections: {:?}",
+                                                    "failed to resync connections: {}",
                                                     sync_err
                                                 );
                                             }
@@ -424,10 +424,10 @@ impl<T: BrokerConnection + Clone + Debug + Send + Sync + 'static> SyncProducer<T
                     if let Some((_id, conn)) = metadata.broker_connections.iter().next() {
                         let conn_clone = conn.clone();
                         if let Err(e) = metadata.fetch(conn_clone).await {
-                            log::error!("broker metadata refresh failed: {:?}", e);
+                            log::error!("broker metadata refresh failed: {}", e);
                         }
                         if let Err(sync_err) = metadata.sync().await {
-                            log::error!("failed to resync connections: {:?}", sync_err);
+                            log::error!("failed to resync connections: {}", sync_err);
                         }
                     }
 
