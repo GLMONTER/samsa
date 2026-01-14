@@ -431,7 +431,7 @@ impl<T: BrokerConnection + Clone + Debug + Send + Sync + 'static> SyncProducer<T
                         }
                     }
 
-                    Err(anyhow!("failed to send message: {:?}", e))
+                    Err(anyhow!("failed to send message: {}", e))
                 }
             }
         })
