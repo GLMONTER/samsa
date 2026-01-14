@@ -1,14 +1,14 @@
+use async_trait::async_trait;
+use bytes::BytesMut;
+use rustls_pemfile::{certs, pkcs8_private_keys, rsa_private_keys};
+use rustls_pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs1KeyDer};
 use std::fs::File;
 use std::io::BufReader;
 use std::io::ErrorKind;
 use std::net::ToSocketAddrs;
 use std::path::PathBuf;
-use std::{io, sync::Arc};
 use std::time::Duration;
-use async_trait::async_trait;
-use bytes::BytesMut;
-use rustls_pemfile::{certs, pkcs8_private_keys, rsa_private_keys};
-use rustls_pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs1KeyDer};
+use std::{io, sync::Arc};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader as TokioBufReader};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
@@ -344,20 +344,18 @@ impl ProxyTlsConnection {
         }
 
         for broker_option in options.broker_options.iter() {
-            let certs = load_certs(&options.tls_config.cert)
-                .map_err(|e| Error::IoError(e.kind()))?;
-            let key = load_keys(&options.tls_config.key)
-                .map_err(|e| Error::IoError(e.kind()))?;
+            let certs =
+                load_certs(&options.tls_config.cert).map_err(|e| Error::IoError(e.kind()))?;
+            let key = load_keys(&options.tls_config.key).map_err(|e| Error::IoError(e.kind()))?;
 
             // Wrap entire connection process in timeout
             let connection_result = tokio::time::timeout(
                 Duration::from_secs(30), // Proxy connections may take longer
                 async {
                     // Establish TCP connection through proxy
-                    let tcp_stream = ProxyTcpConnection::connect_through_proxy(
-                        &options.proxy,
-                        broker_option,
-                    ).await?;
+                    let tcp_stream =
+                        ProxyTcpConnection::connect_through_proxy(&options.proxy, broker_option)
+                            .await?;
 
                     // Set up TLS
                     let config = rustls::ClientConfig::builder()
@@ -371,12 +369,15 @@ impl ProxyTlsConnection {
                         .to_owned();
 
                     // TLS handshake
-                    let tls_stream = connector.connect(domain, tcp_stream).await
+                    let tls_stream = connector
+                        .connect(domain, tcp_stream)
+                        .await
                         .map_err(|e| Error::IoError(e.kind()))?;
 
                     Ok::<TlsStream<TcpStream>, Error>(tls_stream)
-                }
-            ).await;
+                },
+            )
+            .await;
 
             match connection_result {
                 Ok(Ok(tls_stream)) => {

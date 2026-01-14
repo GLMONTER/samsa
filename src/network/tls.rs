@@ -61,7 +61,10 @@ impl TlsConnection {
     /// let conn = samsa::prelude::BrokerConnection(addrs).await?;
     /// ```
     pub async fn new_(options: TlsConnectionOptions) -> Result<Self> {
-        tracing::debug!("Starting connection to {} brokers", options.broker_options.len());
+        tracing::debug!(
+            "Starting connection to {} brokers",
+            options.broker_options.len()
+        );
         let mut propagated_err: Option<crate::error::Error> = None;
 
         let mut root_cert_store = rustls::RootCertStore::empty();
@@ -82,45 +85,43 @@ impl TlsConnection {
                 .ok_or_else(|| crate::error::Error::IoError(ErrorKind::NotFound))?;
 
             tracing::debug!("Connecting to {}", broker_option.host);
-            let certs = load_certs(&options.cert)
-                .map_err(|e| crate::error::Error::IoError(e.kind()))?;
-            let key = load_keys(&options.key)
-                .map_err(|e| crate::error::Error::IoError(e.kind()))?;
+            let certs =
+                load_certs(&options.cert).map_err(|e| crate::error::Error::IoError(e.kind()))?;
+            let key =
+                load_keys(&options.key).map_err(|e| crate::error::Error::IoError(e.kind()))?;
 
-            let connection_result = tokio::time::timeout(
-                Duration::from_secs(10),
-                async {
-                    // TCP connect
-                    let tcp_stream = TcpStream::connect(addr).await
-                        .map_err(|e| crate::error::Error::IoError(e.kind()))?;
+            let connection_result = tokio::time::timeout(Duration::from_secs(10), async {
+                // TCP connect
+                let tcp_stream = TcpStream::connect(addr)
+                    .await
+                    .map_err(|e| crate::error::Error::IoError(e.kind()))?;
 
-                    tracing::debug!("connected on tcp");
+                tracing::debug!("connected on tcp");
 
-                    // TLS setup
-                    let config = rustls::ClientConfig::builder()
-                        .with_root_certificates(root_cert_store.clone())
-                        .with_client_auth_cert(certs, key)
-                        .unwrap();
+                // TLS setup
+                let config = rustls::ClientConfig::builder()
+                    .with_root_certificates(root_cert_store.clone())
+                    .with_client_auth_cert(certs, key)
+                    .unwrap();
 
-                    let connector = TlsConnector::from(Arc::new(config));
-                    let domain = rustls_pki_types::ServerName::try_from(broker_option.host.clone())
-                        .map_err(|_| crate::error::Error::IoError(ErrorKind::InvalidInput))?
-                        .to_owned();
+                let connector = TlsConnector::from(Arc::new(config));
+                let domain = rustls_pki_types::ServerName::try_from(broker_option.host.clone())
+                    .map_err(|_| crate::error::Error::IoError(ErrorKind::InvalidInput))?
+                    .to_owned();
 
-                    // TLS handshake
-                    let stream = connector.connect(domain, tcp_stream).await
-                        .map_err(|e| {
-                            if let Some(err) = e.source() {
-                                log::error!("failed to connect to broker over TLS: {:?}", err);
-                            } else {
-                                log::error!("failed to connect to broker over TLS: {}", e);
-                            }
-                            crate::error::Error::IoError(Other)
-                        })?;
+                // TLS handshake
+                let stream = connector.connect(domain, tcp_stream).await.map_err(|e| {
+                    if let Some(err) = e.source() {
+                        log::error!("failed to connect to broker over TLS: {:?}", err);
+                    } else {
+                        log::error!("failed to connect to broker over TLS: {}", e);
+                    }
+                    crate::error::Error::IoError(Other)
+                })?;
 
-                    Ok::<TlsStream<TcpStream>, crate::error::Error>(stream)
-                }
-            ).await;
+                Ok::<TlsStream<TcpStream>, crate::error::Error>(stream)
+            })
+            .await;
 
             match connection_result {
                 Ok(Ok(stream)) => {
