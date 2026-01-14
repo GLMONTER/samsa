@@ -210,7 +210,7 @@ async fn producer<T: BrokerConnection + Clone + Debug + Send + 'static>(
                         .await
                         {
                             Err(err) => {
-                                tracing::error!("Error in producer agent {:?}", err);
+                                log::error!("failed to produce message {:?}", err);
                             }
                             Ok(r) => {
                                 if let Err(err) = output_sender.send(r) {
@@ -229,7 +229,12 @@ async fn producer<T: BrokerConnection + Clone + Debug + Send + 'static>(
                 if let Some((_id, conn)) = cluster_metadata.broker_connections.iter().next() {
                     let conn_clone = conn.clone();
                     if let Err(e) = cluster_metadata.fetch(conn_clone).await {
-                        log::error!("broker metadata refresh failed: {:?}", e);
+                        log::error!("broker metadata refresh failed: {:?}, attempting to resync...", e);
+                        if let Err(sync_err) = cluster_metadata.sync().await {
+                            log::error!("failed to resync broker connections: {:?}", sync_err);
+                        } else {
+                            log::info!("resynced broker connections");
+                        }
                     }
                 }
             }
