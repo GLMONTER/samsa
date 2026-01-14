@@ -1,11 +1,12 @@
 //! Client that sends records to a cluster.
 
-use std::{collections::HashMap, fmt::Debug};
+use std::{collections::HashMap, fmt::Debug, sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use tokio::{
     sync::mpsc::{Sender, UnboundedReceiver},
-    task::JoinSet,
+    sync::Mutex,
+    task::{JoinHandle, JoinSet},
 };
 use tracing::instrument;
 
@@ -231,5 +232,168 @@ pub async fn produce(
         Ok(Some(response))
     } else {
         Ok(None)
+    }
+}
+
+/// Synchronous producer that provides direct error handling.
+///
+/// Unlike the standard [`Producer`], this producer sends messages immediately
+/// and returns errors directly, rather than batching and using a background worker.
+/// It also maintains a background metadata refresh task to keep connections healthy.
+///
+/// ### Example
+/// ```rust
+/// use samsa::prelude::*;
+///
+/// let producer = SyncProducer::<TlsConnection>::new(
+///     TlsConnectionOptions {
+///         broker_options: vec![BrokerAddress {
+///             host: "127.0.0.1".to_owned(),
+///             port: 9092,
+///         }],
+///         key: "/path_to_key".into(),
+///         cert: "/path_to_cert".into(),
+///         cafile: Some("/path_to_ca".into()),
+///     },
+///     vec!["my-topic".to_string()],
+///     10, // refresh metadata every 10 seconds
+/// )
+/// .await?;
+///
+/// let message = ProduceMessage {
+///     topic: "my-topic".to_string(),
+///     partition_id: 0,
+///     key: Some(bytes::Bytes::from_static(b"key")),
+///     value: Some(bytes::Bytes::from_static(b"value")),
+///     headers: vec![],
+/// };
+///
+/// let result = producer.produce(message).await?;
+/// ```
+pub struct SyncProducer<T: BrokerConnection> {
+    cluster_metadata: Arc<Mutex<ClusterMetadata<T>>>,
+    produce_params: ProduceParams,
+    attributes: Attributes,
+    _keepalive_task: JoinHandle<()>,
+}
+
+impl<T: BrokerConnection + Clone + Debug + Send + Sync + 'static> SyncProducer<T> {
+    /// Create a new synchronous producer with automatic metadata refresh.
+    ///
+    /// # Arguments
+    /// * `connection_params` - Connection configuration for the broker
+    /// * `topics` - List of topics this producer will send to
+    /// * `keepalive_interval_secs` - How often to refresh metadata (in seconds)
+    pub async fn new(
+        connection_params: T::ConnConfig,
+        topics: Vec<String>,
+        keepalive_interval_secs: u64,
+    ) -> Result<Self> {
+        let cluster_metadata = Arc::new(Mutex::new(
+            ClusterMetadata::<T>::new(
+                connection_params,
+                DEFAULT_CORRELATION_ID,
+                DEFAULT_CLIENT_ID.to_owned(),
+                topics,
+            )
+            .await?,
+        ));
+
+        let produce_params = ProduceParams::new();
+        let attributes = Attributes::new(None);
+
+        // Spawn keepalive task
+        let metadata_clone = Arc::clone(&cluster_metadata);
+        let keepalive_task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(keepalive_interval_secs));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            loop {
+                interval.tick().await;
+                let mut metadata = metadata_clone.lock().await;
+
+                if let Some((_id, conn)) = metadata.broker_connections.iter().next() {
+                    let conn_clone = conn.clone();
+                    if let Err(e) = metadata.fetch(conn_clone).await {
+                        log::error!(
+                            "broker metadata refresh failed: {:?}, attempting resync",
+                            e
+                        );
+                        if let Err(sync_err) = metadata.sync().await {
+                            log::error!("failed to resync connections: {:?}", sync_err);
+                        } else {
+                            log::info!("successfully resynced connections");
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok(Self {
+            cluster_metadata,
+            produce_params,
+            attributes,
+            _keepalive_task: keepalive_task,
+        })
+    }
+
+    /// Set the correlation ID for requests.
+    pub fn correlation_id(mut self, correlation_id: i32) -> Self {
+        self.produce_params.correlation_id = correlation_id;
+        self
+    }
+
+    /// Set the client ID for requests.
+    pub fn client_id(mut self, client_id: String) -> Self {
+        self.produce_params.client_id = client_id;
+        self
+    }
+
+    /// Set the number of acknowledgments required.
+    /// * 0 - no acknowledgments
+    /// * 1 - leader only
+    /// * -1 - full ISR
+    pub fn required_acks(mut self, required_acks: i16) -> Self {
+        self.produce_params.required_acks = required_acks;
+        self
+    }
+
+    /// Set the timeout for awaiting a response (in milliseconds).
+    pub fn timeout_ms(mut self, timeout_ms: i32) -> Self {
+        self.produce_params.timeout_ms = timeout_ms;
+        self
+    }
+
+    /// Set the compression algorithm.
+    pub fn compression(mut self, algo: crate::prelude::Compression) -> Self {
+        self.attributes.compression = Some(algo);
+        self
+    }
+
+    /// Produce a message and wait for the result.
+    ///
+    /// This sends the message immediately and returns the broker's response or error.
+    pub async fn produce(
+        &self,
+        message: ProduceMessage,
+    ) -> Result<Vec<Option<ProduceResponse>>> {
+        let metadata = self.cluster_metadata.lock().await;
+        flush_producer(&*metadata, &self.produce_params, vec![message], self.attributes.clone())
+            .await
+    }
+
+    /// Produce multiple messages in a single batch.
+    pub async fn produce_batch(
+        &self,
+        messages: Vec<ProduceMessage>,
+    ) -> Result<Vec<Option<ProduceResponse>>> {
+        let metadata = self.cluster_metadata.lock().await;
+        flush_producer(&*metadata, &self.produce_params, messages, self.attributes.clone()).await
+    }
+}
+
+impl<T: BrokerConnection> Drop for SyncProducer<T> {
+    fn drop(&mut self) {
+        self._keepalive_task.abort();
     }
 }

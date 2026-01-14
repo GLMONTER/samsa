@@ -682,7 +682,7 @@ pub mod prelude {
         tls::{SaslTlsConfig, SaslTlsConnection, TlsConnection, TlsConnectionOptions},
         BrokerAddress, BrokerConnection,
     };
-    pub use crate::producer::{produce, ProduceMessage, Producer};
+    pub use crate::producer::{produce, ProduceMessage, Producer, SyncProducer};
     pub use crate::producer_builder::ProducerBuilder;
     /// Message Header.
     pub use crate::protocol::Header;
