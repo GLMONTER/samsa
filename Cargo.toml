@@ -42,6 +42,7 @@ webpki-roots = "0.26.1"
 rand = "0.8.5"
 base64 = "0.22.1"
 log = "0.4.21"
+anyhow = "1.0.100"
 
 [dev-dependencies]
 criterion = {version = "0.3", features = ["async_tokio"]}

@@ -1,8 +1,8 @@
 //! Client that sends records to a cluster.
 
-use std::{collections::HashMap, fmt::Debug, sync::Arc, time::Duration};
-
+use anyhow::anyhow;
 use bytes::Bytes;
+use std::{collections::HashMap, fmt::Debug, sync::Arc, time::Duration};
 use tokio::{
     sync::mpsc::{Sender, UnboundedReceiver},
     sync::Mutex,
@@ -10,6 +10,7 @@ use tokio::{
 };
 use tracing::instrument;
 
+use crate::error::KafkaCode;
 use crate::{
     error::{Error, Result},
     metadata::ClusterMetadata,
@@ -315,15 +316,10 @@ impl<T: BrokerConnection + Clone + Debug + Send + Sync + 'static> SyncProducer<T
                 if let Some((_id, conn)) = metadata.broker_connections.iter().next() {
                     let conn_clone = conn.clone();
                     if let Err(e) = metadata.fetch(conn_clone).await {
-                        log::error!(
-                            "broker metadata refresh failed: {:?}, attempting resync",
-                            e
-                        );
-                        if let Err(sync_err) = metadata.sync().await {
-                            log::error!("failed to resync connections: {:?}", sync_err);
-                        } else {
-                            log::info!("successfully resynced connections");
-                        }
+                        log::error!("broker metadata refresh failed: {:?}", e);
+                    }
+                    if let Err(sync_err) = metadata.sync().await {
+                        log::error!("failed to resync connections: {:?}", sync_err);
                     }
                 }
             }
@@ -373,22 +369,56 @@ impl<T: BrokerConnection + Clone + Debug + Send + Sync + 'static> SyncProducer<T
     /// Produce a message and wait for the result.
     ///
     /// This sends the message immediately and returns the broker's response or error.
-    pub async fn produce(
-        &self,
-        message: ProduceMessage,
-    ) -> Result<Vec<Option<ProduceResponse>>> {
-        let metadata = self.cluster_metadata.lock().await;
-        flush_producer(&*metadata, &self.produce_params, vec![message], self.attributes.clone())
-            .await
-    }
+    pub async fn produce(&self, message: ProduceMessage) -> anyhow::Result<()> {
+        let mut metadata = self.cluster_metadata.lock().await;
+        match flush_producer(
+            &*metadata,
+            &self.produce_params,
+            vec![message],
+            self.attributes.clone(),
+        )
+        .await
+        {
+            Ok(responses) => Ok(for response_opt in responses {
+                if let Some(response) = response_opt {
+                    for topic_response in response.responses.iter() {
+                        for partition_response in topic_response.partition_responses.iter() {
+                            if partition_response.error_code != KafkaCode::None {
+                                //instantly attempt to refresh connection instead of waiting for task so we can start sending message quickly
+                                if let Some((_id, conn)) = metadata.broker_connections.iter().next() {
+                                    let conn_clone = conn.clone();
+                                    if let Err(e) = metadata.fetch(conn_clone).await {
+                                        log::error!("broker metadata refresh failed: {:?}", e);
+                                    }
+                                    if let Err(sync_err) = metadata.sync().await {
+                                        log::error!("failed to resync connections: {:?}", sync_err);
+                                    }
+                                }
 
-    /// Produce multiple messages in a single batch.
-    pub async fn produce_batch(
-        &self,
-        messages: Vec<ProduceMessage>,
-    ) -> Result<Vec<Option<ProduceResponse>>> {
-        let metadata = self.cluster_metadata.lock().await;
-        flush_producer(&*metadata, &self.produce_params, messages, self.attributes.clone()).await
+                                return Err(anyhow!(
+                                    "failed to send message: {:?}",
+                                    partition_response.error_code
+                                ));
+                            }
+                        }
+                    }
+                }
+            }),
+            Err(e) => {
+                //instantly attempt to refresh connection instead of waiting for task so we can start sending message quickly
+                if let Some((_id, conn)) = metadata.broker_connections.iter().next() {
+                    let conn_clone = conn.clone();
+                    if let Err(e) = metadata.fetch(conn_clone).await {
+                        log::error!("broker metadata refresh failed: {:?}", e);
+                    }
+                    if let Err(sync_err) = metadata.sync().await {
+                        log::error!("failed to resync connections: {:?}", sync_err);
+                    }
+                }
+
+                Err(anyhow!("failed to send message: {:?}", e))
+            }
+        }
     }
 }
 
