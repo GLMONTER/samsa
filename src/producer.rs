@@ -288,7 +288,7 @@ impl<T: BrokerConnection + Clone + Debug + Send + Sync + 'static> SyncProducer<T
     pub async fn new(
         connection_params: T::ConnConfig,
         topics: Vec<String>,
-        keepalive_interval_secs: u64,
+        keepalive_interval_secs: Duration,
     ) -> Result<Self> {
         let cluster_metadata = Arc::new(Mutex::new(
             ClusterMetadata::<T>::new(
@@ -306,7 +306,7 @@ impl<T: BrokerConnection + Clone + Debug + Send + Sync + 'static> SyncProducer<T
         // Spawn keepalive task
         let metadata_clone = Arc::clone(&cluster_metadata);
         let keepalive_task = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(keepalive_interval_secs));
+            let mut interval = tokio::time::interval(keepalive_interval_secs);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
             loop {
