@@ -110,7 +110,7 @@ impl<'a, T: BrokerConnection + Clone + Debug> ClusterMetadata<T> {
     //         Partition { error_code: KafkaCode::None, partition_index: 1, leader_id: 2, replica_nodes: [2], isr_nodes: [2] },
     //         Partition { error_code: KafkaCode::None, partition_index: 2, leader_id: 1, replica_nodes: [1], isr_nodes: [1] },
     //         Partition { error_code: KafkaCode::None, partition_index: 3, leader_id: 2, replica_nodes: [2], isr_nodes: [2] }] }] }
-    #[instrument(name = "metadata-fetch")]
+    #[instrument(name = "metadata-fetch", level = "debug")]
     pub async fn fetch(&mut self, mut conn: T) -> Result<()> {
         tracing::debug!("Fetching metadata");
         let metadata_request =
