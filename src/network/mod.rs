@@ -55,7 +55,7 @@ pub struct BrokerAddress {
 
 /// Trait abstracting connections across multiple protocols
 #[async_trait]
-pub trait BrokerConnection {
+pub trait BrokerConnection: Send + 'static {
     type ConnConfig: Clone + Debug + Send + Sync;
 
     /// Serialize a given request and send to Kafka/Redpanda broker.

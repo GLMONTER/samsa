@@ -98,7 +98,7 @@ pub struct ProduceMessage {
     pub value: Option<Bytes>,
     pub headers: Vec<Header>,
     pub topic: String,
-    pub partition_id: i32,
+    pub partition_id: Option<i32>,
 }
 
 impl Producer {
@@ -120,18 +120,25 @@ pub(crate) async fn flush_producer<T: BrokerConnection + Clone + Debug + Send + 
     let mut brokers_and_messages = HashMap::new();
     tracing::debug!("Producing {} messages", messages.len());
     for message in messages {
+        let partition_id = cluster_metadata.resolve_partition(
+            &message.topic,
+            &message.key,
+            message.partition_id,
+        )?;
+
         let broker_id = cluster_metadata
-            .get_leader_id_for_topic_partition(&message.topic, message.partition_id)
+            .get_leader_id_for_topic_partition(&message.topic, partition_id)
             .ok_or(Error::NoLeaderForTopicPartition(
                 message.topic.clone(),
-                message.partition_id,
+                partition_id,
             ))?;
+
 
         match brokers_and_messages.get_mut(&broker_id) {
             None => {
-                brokers_and_messages.insert(broker_id, vec![message]);
+                brokers_and_messages.insert(broker_id, vec![(message, partition_id)]);
             }
-            Some(messages) => messages.push(message),
+            Some(messages) => messages.push((message, partition_id)),
         };
     }
 
@@ -204,7 +211,7 @@ pub async fn produce(
     client_id: &str,
     required_acks: i16,
     timeout_ms: i32,
-    messages: &Vec<ProduceMessage>,
+    messages: &Vec<(ProduceMessage, i32)>,
     attributes: Attributes,
 ) -> Result<Option<ProduceResponse>> {
     tracing::debug!("Producing {} messages", messages.len());
@@ -217,10 +224,10 @@ pub async fn produce(
         attributes,
     );
 
-    for message in messages {
+    for (message, partition_id) in messages {
         produce_request.add(
             &message.topic,
-            message.partition_id,
+            *partition_id,
             message.key.clone(),
             message.value.clone(),
             message.headers.clone(),

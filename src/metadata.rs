@@ -1,6 +1,6 @@
 //! Cluster metadata & operations.
 use std::{collections::HashMap, fmt::Debug};
-
+use bytes::Bytes;
 use nom::AsBytes;
 use tracing::instrument;
 
@@ -25,7 +25,7 @@ pub struct ClusterMetadata<T: BrokerConnection> {
 
 type TopicPartition = HashMap<String, Vec<i32>>;
 
-impl<'a, T: BrokerConnection + Clone + Debug> ClusterMetadata<T> {
+impl<'a, T: BrokerConnection + Clone + Debug + Send + 'static> ClusterMetadata<T> {
     pub async fn new(
         connection_params: T::ConnConfig,
         correlation_id: i32,
@@ -87,16 +87,92 @@ impl<'a, T: BrokerConnection + Clone + Debug> ClusterMetadata<T> {
         Some(leader.node_id)
     }
 
+
+    pub fn resolve_partition(
+        &self,
+        topic: &str,
+        key: &Option<Bytes>,
+        explicit_partition: Option<i32>,
+    ) -> Result<i32> {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static ROUND_ROBIN: AtomicUsize = AtomicUsize::new(0);
+
+        //respect explicit partition if provided
+        if let Some(p) = explicit_partition {
+            return Ok(p);
+        }
+
+        //find topic (Bytes -> &str comparison)
+        let topic_meta = self
+            .topics
+            .iter()
+            .find(|t| t.name.as_ref() == topic.as_bytes())
+            .ok_or(Error::NoLeaderForTopicPartition(topic.to_string(), -1))?;
+
+        //collect partition ids
+        let partitions: Vec<i32> = topic_meta
+            .partitions
+            .iter()
+            .map(|p| p.partition_index)
+            .collect();
+
+        if partitions.is_empty() {
+            return Err(Error::NoLeaderForTopicPartition(
+                topic.to_string(),
+                -1,
+            ));
+        }
+
+        //key-based hashing
+        if let Some(key) = key {
+            let mut hasher = DefaultHasher::new();
+            key.hash(&mut hasher);
+            let idx = (hasher.finish() as usize) % partitions.len();
+            return Ok(partitions[idx]);
+        }
+
+        //round-robin fallback
+        let idx = ROUND_ROBIN.fetch_add(1, Ordering::Relaxed) % partitions.len();
+        Ok(partitions[idx])
+    }
+
     #[instrument(name = "metadata-sync", level = "debug")]
     pub async fn sync(&mut self) -> Result<()> {
         tracing::debug!("Syncing metadata");
-        // let mut set = JoinSet::new();
+
+        let mut set = tokio::task::JoinSet::new();
 
         for broker in self.brokers.iter() {
-            let id: i32 = broker.node_id;
+            let id = broker.node_id;
             let addr = broker.addr()?;
-            let conn = T::from_addr(self.connection_params.clone(), addr).await?;
-            self.broker_connections.insert(id, conn);
+            let params = self.connection_params.clone();
+
+            set.spawn(async move {
+                let conn = T::from_addr(params, addr).await;
+                (id, conn)
+            });
+        }
+
+        while let Some(result) = set.join_next().await {
+            match result {
+                Ok((id, Ok(conn))) => {
+                    self.broker_connections.insert(id, conn);
+                }
+                Ok((id, Err(e))) => {
+                    log::warn!("failed to connect to broker {}: {:?}", id, e);
+                    //don't bail, other brokers may be fine
+                }
+                Err(e) => {
+                    log::warn!("join error during broker sync: {:?}", e);
+                }
+            }
+        }
+
+        if self.broker_connections.is_empty() {
+            return Err(Error::IoError(std::io::ErrorKind::TimedOut));
         }
 
         Ok(())
