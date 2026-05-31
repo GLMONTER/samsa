@@ -206,7 +206,9 @@ impl<'a, T: BrokerConnection + Clone + Debug + Send + 'static> ClusterMetadata<T
         for topic in &metadata_response.topics {
             let vec = topic.name.to_vec();
             let name = String::from_utf8(vec).map_err(|_| Error::DecodingUtf8Error)?;
-            self.topic_names.push(name);
+            if !self.topic_names.contains(&name) {
+                self.topic_names.push(name);
+            }
         }
 
         Ok(())
