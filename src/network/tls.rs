@@ -134,7 +134,7 @@ impl TlsConnection {
                     propagated_err = Some(e);
                 }
                 Err(_) => {
-                    tracing::error!("Connection timeout for broker {}", broker_option.host);
+                    tracing::debug!("Connection timeout for broker {}", broker_option.host);
                     propagated_err = Some(crate::error::Error::IoError(ErrorKind::TimedOut));
                 }
             }

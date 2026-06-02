@@ -389,7 +389,7 @@ impl ProxyTlsConnection {
                     propagated_err = Some(e);
                 }
                 Err(_) => {
-                    tracing::error!("Connection timeout for broker {}", broker_option.host);
+                    tracing::debug!("Connection timeout for broker {}", broker_option.host);
                     propagated_err = Some(Error::IoError(ErrorKind::TimedOut));
                 }
             }

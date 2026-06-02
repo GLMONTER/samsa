@@ -162,7 +162,7 @@ impl<'a, T: BrokerConnection + Clone + Debug + Send + 'static> ClusterMetadata<T
                     self.broker_connections.insert(id, conn);
                 }
                 Ok((id, Err(e))) => {
-                    log::warn!("failed to connect to broker {}: {:?}", id, e);
+                    log::debug!("failed to connect to broker {}: {:?}", id, e);
                     //don't bail, other brokers may be fine
                 }
                 Err(e) => {
