@@ -1,7 +1,7 @@
 //! Cluster metadata & operations.
-use std::{collections::HashMap, fmt::Debug};
 use bytes::Bytes;
 use nom::AsBytes;
+use std::{collections::HashMap, fmt::Debug};
 use tracing::instrument;
 
 use crate::{
@@ -94,8 +94,6 @@ impl<'a, T: BrokerConnection + Clone + Debug + Send + 'static> ClusterMetadata<T
         key: &Option<Bytes>,
         explicit_partition: Option<i32>,
     ) -> Result<i32> {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         static ROUND_ROBIN: AtomicUsize = AtomicUsize::new(0);
@@ -124,14 +122,6 @@ impl<'a, T: BrokerConnection + Clone + Debug + Send + 'static> ClusterMetadata<T
                 topic.to_string(),
                 -1,
             ));
-        }
-
-        //key-based hashing
-        if let Some(key) = key {
-            let mut hasher = DefaultHasher::new();
-            key.hash(&mut hasher);
-            let idx = (hasher.finish() as usize) % partitions.len();
-            return Ok(partitions[idx]);
         }
 
         //round-robin fallback
