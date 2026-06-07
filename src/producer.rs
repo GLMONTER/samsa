@@ -41,57 +41,11 @@ impl ProduceParams {
     }
 }
 
-/// Kafka/Redpanda Producer.
-///
-/// This struct is a broker to a background worker that
-/// does the actual producing. The background worker's job is to
-/// collect incoming messages in a queue. When the queue fills up,
-/// the messages are flushed. If the queue takes longer than a given
-/// time to fill up, the messages are flushed. These two configurable
-/// parameters found in the [`ProducerBuilder`](crate::prelude::ProducerBuilder) help dial in latency and throughput.
-///
-/// ### Example
-/// ```rust
-/// use samsa::prelude::*;
-///
-/// let bootstrap_addrs = vec![BrokerAddress {
-///         host: "127.0.0.1".to_owned(),
-///         port: 9092,
-///     }];
-/// let topic_name = "my-topic".to_string();
-/// let partition_id = 0;
-///
-/// // create a stream of 5k messages in batches of 100
-/// let stream = iter(0..5000).map(|_| ProduceMessage {
-///     topic: topic_name.to_string(),
-///     partition_id,
-///     key: Some(bytes::Bytes::from_static(b"Tester")),
-///     value: Some(bytes::Bytes::from_static(b"Value")),
-///     headers: vec![
-///         Header::new(String::from("Key"), bytes::Bytes::from("Value"))
-///     ],
-/// }).chunks(100);
-///
-/// let output_stream =
-/// ProducerBuilder::<TcpConnection>::new(bootstrap_addrs, vec![topic_name.to_string()])
-///     .await?
-///     .batch_timeout_ms(1000)
-///     .max_batch_size(100)
-///     .clone()
-///     .build_from_stream(stream)
-///     .await;
-///
-/// tokio::pin!(output_stream);
-/// while (output_stream.next().await).is_some() {}
-/// ```
 pub struct Producer {
-    /// Direct connection to the background worker.
     pub sender: Sender<ProduceMessage>,
-    /// Responses of the
     pub receiver: UnboundedReceiver<Vec<Option<ProduceResponse>>>,
 }
 
-/// Common produce message format.
 #[derive(Clone)]
 pub struct ProduceMessage {
     pub key: Option<Bytes>,
@@ -109,7 +63,6 @@ impl Producer {
     }
 }
 
-// vector for the results from each broker
 #[instrument(level = "debug", skip(messages, produce_params, cluster_metadata))]
 pub(crate) async fn flush_producer<T: BrokerConnection + Clone + Debug + Send + 'static>(
     cluster_metadata: &ClusterMetadata<T>,
@@ -132,7 +85,6 @@ pub(crate) async fn flush_producer<T: BrokerConnection + Clone + Debug + Send + 
                 message.topic.clone(),
                 partition_id,
             ))?;
-
 
         match brokers_and_messages.get_mut(&broker_id) {
             None => {
@@ -243,59 +195,26 @@ pub async fn produce(
     }
 }
 
-/// Synchronous producer that provides direct error handling.
-///
-/// Unlike the standard [`Producer`], this producer sends messages immediately
-/// and returns errors directly, rather than batching and using a background worker.
-/// It also maintains a background metadata refresh task to keep connections healthy.
-///
-/// ### Example
-/// ```rust
-/// use samsa::prelude::*;
-///
-/// let producer = SyncProducer::<TlsConnection>::new(
-///     TlsConnectionOptions {
-///         broker_options: vec![BrokerAddress {
-///             host: "127.0.0.1".to_owned(),
-///             port: 9092,
-///         }],
-///         key: "/path_to_key".into(),
-///         cert: "/path_to_cert".into(),
-///         cafile: Some("/path_to_ca".into()),
-///     },
-///     vec!["my-topic".to_string()],
-///     10, // refresh metadata every 10 seconds
-/// )
-/// .await?;
-///
-/// let message = ProduceMessage {
-///     topic: "my-topic".to_string(),
-///     partition_id: 0,
-///     key: Some(bytes::Bytes::from_static(b"key")),
-///     value: Some(bytes::Bytes::from_static(b"value")),
-///     headers: vec![],
-/// };
-///
-/// let result = producer.produce(message).await?;
-/// ```
 pub struct SyncProducer<T: BrokerConnection> {
     cluster_metadata: Arc<Mutex<ClusterMetadata<T>>>,
     produce_params: ProduceParams,
     attributes: Attributes,
+    /// Tracks when we last did an error-triggered metadata refresh so we don't
+    /// hammer the broker with reconnects during an error storm.
+    last_metadata_refresh: Arc<Mutex<std::time::Instant>>,
+    /// Minimum time between error-triggered metadata refreshes. Configurable
+    /// so callers can tune the tradeoff between refresh responsiveness and
+    /// connection overhead during sustained error periods.
+    min_metadata_refresh_interval: Duration,
     _keepalive_task: JoinHandle<()>,
 }
 
 impl<T: BrokerConnection + Clone + Debug + Send + Sync + 'static> SyncProducer<T> {
-    /// Create a new synchronous producer with automatic metadata refresh.
-    ///
-    /// # Arguments
-    /// * `connection_params` - Connection configuration for the broker
-    /// * `topics` - List of topics this producer will send to
-    /// * `keepalive_interval_secs` - How often to refresh metadata (in seconds)
     pub async fn new(
         connection_params: T::ConnConfig,
         topics: Vec<String>,
-        keepalive_interval_secs: Duration,
+        keepalive_interval: Duration,
+        min_metadata_refresh_interval: Duration,
     ) -> Result<Self> {
         let cluster_metadata = Arc::new(Mutex::new(
             ClusterMetadata::<T>::new(
@@ -310,23 +229,46 @@ impl<T: BrokerConnection + Clone + Debug + Send + Sync + 'static> SyncProducer<T
         let produce_params = ProduceParams::new();
         let attributes = Attributes::new(None);
 
-        // Spawn keepalive task
         let metadata_clone = Arc::clone(&cluster_metadata);
         let keepalive_task = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(keepalive_interval_secs);
+            let mut interval = tokio::time::interval(keepalive_interval);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
             loop {
                 interval.tick().await;
                 let mut metadata = metadata_clone.lock().await;
 
+                let broker_ids_before: Vec<i32> =
+                    metadata.broker_connections.keys().copied().collect();
+
                 if let Some((_id, conn)) = metadata.broker_connections.iter().next() {
                     let conn_clone = conn.clone();
-                    if let Err(e) = metadata.fetch(conn_clone).await {
-                        log::error!("broker metadata refresh failed: {}", e);
-                    }
-                    if let Err(sync_err) = metadata.sync().await {
-                        log::error!("failed to resync connections: {}", sync_err);
+                    match metadata.fetch(conn_clone).await {
+                        Err(e) => {
+                            //don't sync on fetch failure, existing connections
+                            //are still valid, no need to rebuild them.
+                            log::error!("broker metadata refresh failed: {}", e);
+                        }
+                        Ok(()) => {
+                            //only sync (open new TLS connections) if the broker
+                            //set actually changed.
+                            let broker_ids_after: Vec<i32> =
+                                metadata.brokers.iter().map(|b| b.node_id).collect();
+
+                            let topology_changed = broker_ids_after
+                                .iter()
+                                .any(|id| !broker_ids_before.contains(id))
+                                || broker_ids_before
+                                    .iter()
+                                    .any(|id| !broker_ids_after.contains(id));
+
+                            if topology_changed {
+                                log::info!("queue topology changed, resyncing connections");
+                                if let Err(e) = metadata.sync().await {
+                                    log::error!("failed to resync connections: {}", e);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -336,6 +278,14 @@ impl<T: BrokerConnection + Clone + Debug + Send + Sync + 'static> SyncProducer<T
             cluster_metadata,
             produce_params,
             attributes,
+            last_metadata_refresh: Arc::new(Mutex::new(
+                //set far enough in the past that the first error always
+                //triggers a refresh immediately.
+                std::time::Instant::now()
+                    .checked_sub(min_metadata_refresh_interval * 2)
+                    .unwrap_or(std::time::Instant::now()),
+            )),
+            min_metadata_refresh_interval,
             _keepalive_task: keepalive_task,
         })
     }
@@ -373,22 +323,57 @@ impl<T: BrokerConnection + Clone + Debug + Send + Sync + 'static> SyncProducer<T
         self
     }
 
+    /// Refresh metadata only if we haven't done so recently.
+    /// Prevents an error storm from opening a flood of new TLS connections
+    /// to every broker on every failed message.
+    async fn maybe_refresh_metadata(&self) {
+        let mut last = self.last_metadata_refresh.lock().await;
+        if last.elapsed() < self.min_metadata_refresh_interval {
+            tracing::debug!(
+                "skipping metadata refresh, last refresh was {:?} ago",
+                last.elapsed()
+            );
+            return;
+        }
+        *last = std::time::Instant::now();
+        //release the refresh-time lock before acquiring the heavier metadata lock.
+        drop(last);
+
+        let mut metadata = self.cluster_metadata.lock().await;
+        Self::refresh_metadata(&mut metadata).await;
+    }
+
+    async fn refresh_metadata(metadata: &mut ClusterMetadata<T>) {
+        if let Some((_id, conn)) = metadata.broker_connections.iter().next() {
+            let conn_clone = conn.clone();
+            if let Err(e) = metadata.fetch(conn_clone).await {
+                log::error!("broker metadata refresh failed: {}", e);
+            }
+            if let Err(e) = metadata.sync().await {
+                log::error!("failed to resync connections: {}", e);
+            }
+        }
+    }
+
     pub async fn produce_batch(&self, messages: Vec<ProduceMessage>) -> anyhow::Result<()> {
         if messages.is_empty() {
             return Ok(());
         }
 
-        tokio::time::timeout(Duration::from_secs(60), async {
-            let mut metadata = self.cluster_metadata.lock().await;
-
-            match flush_producer(
-                &*metadata,
-                &self.produce_params,
-                messages,
+        // Snapshot the metadata and release the lock before doing any network
+        // I/O. Multiple callers can then pipeline sends concurrently rather than
+        // serialising through a mutex held across the full network round trip.
+        let (metadata_snapshot, produce_params, attributes) = {
+            let metadata = self.cluster_metadata.lock().await;
+            (
+                metadata.clone(),
+                self.produce_params.clone(),
                 self.attributes.clone(),
             )
-            .await
-            {
+        };
+
+        let result = tokio::time::timeout(Duration::from_secs(60), async {
+            match flush_producer(&metadata_snapshot, &produce_params, messages, attributes).await {
                 Ok(responses) => {
                     for response_opt in responses {
                         if let Some(response) = response_opt {
@@ -396,8 +381,6 @@ impl<T: BrokerConnection + Clone + Debug + Send + Sync + 'static> SyncProducer<T
                                 for partition_response in topic_response.partition_responses.iter()
                                 {
                                     if partition_response.error_code != KafkaCode::None {
-                                        Self::refresh_metadata(&mut metadata).await;
-                                        //instantly attempt to refresh connection instead of waiting for task so we can start sending message quickly
                                         return Err(anyhow!(
                                             "failed to send batch: {:?}",
                                             partition_response.error_code
@@ -409,41 +392,38 @@ impl<T: BrokerConnection + Clone + Debug + Send + Sync + 'static> SyncProducer<T
                     }
                     Ok(())
                 }
-                Err(e) => {
-                    //instantly attempt to refresh connection instead of waiting for task so we can start sending message quickly
-                    Self::refresh_metadata(&mut metadata).await;
-                    Err(anyhow!("failed to send batch: {}", e))
-                }
+                Err(e) => Err(anyhow!("failed to send batch: {}", e)),
             }
         })
         .await
-        .map_err(|_| anyhow!("batch operation timed out"))?
-    }
+        .map_err(|_| anyhow!("batch operation timed out"))?;
 
-    async fn refresh_metadata(metadata: &mut ClusterMetadata<T>) {
-        if let Some((_id, conn)) = metadata.broker_connections.iter().next() {
-            let conn_clone = conn.clone();
-            if let Err(e) = metadata.fetch(conn_clone).await {
-                log::error!("broker metadata refresh failed: {}", e);
-            }
-            if let Err(sync_err) = metadata.sync().await {
-                log::error!("failed to resync connections: {}", sync_err);
-            }
+        if result.is_err() {
+            //throttled refresh, won't hammer the broker if errors are sustained
+            //but will refresh promptly on the first error.
+            self.maybe_refresh_metadata().await;
         }
+
+        result
     }
 
-    /// Produce a message and wait for the result.
-    ///
-    /// This sends the message immediately and returns the broker's response or error.
     pub async fn produce(&self, message: ProduceMessage) -> anyhow::Result<()> {
-        tokio::time::timeout(Duration::from_secs(10), async {
-            let mut metadata = self.cluster_metadata.lock().await;
-
-            match flush_producer(
-                &*metadata,
-                &self.produce_params,
-                vec![message],
+        //same snapshot pattern, release the lock before network I/O.
+        let (metadata_snapshot, produce_params, attributes) = {
+            let metadata = self.cluster_metadata.lock().await;
+            (
+                metadata.clone(),
+                self.produce_params.clone(),
                 self.attributes.clone(),
+            )
+        };
+
+        let result = tokio::time::timeout(Duration::from_secs(10), async {
+            match flush_producer(
+                &metadata_snapshot,
+                &produce_params,
+                vec![message],
+                attributes,
             )
             .await
             {
@@ -454,8 +434,6 @@ impl<T: BrokerConnection + Clone + Debug + Send + Sync + 'static> SyncProducer<T
                                 for partition_response in topic_response.partition_responses.iter()
                                 {
                                     if partition_response.error_code != KafkaCode::None {
-                                        //instantly attempt to refresh connection instead of waiting for task so we can start sending message quickly
-                                        Self::refresh_metadata(&mut metadata).await;
                                         return Err(anyhow!(
                                             "failed to send message: {:?}",
                                             partition_response.error_code
@@ -467,15 +445,17 @@ impl<T: BrokerConnection + Clone + Debug + Send + Sync + 'static> SyncProducer<T
                     }
                     Ok(())
                 }
-                Err(e) => {
-                    //instantly attempt to refresh connection instead of waiting for task so we can start sending message quickly
-                    Self::refresh_metadata(&mut metadata).await;
-                    Err(anyhow!("failed to send message: {}", e))
-                }
+                Err(e) => Err(anyhow!("failed to send message: {}", e)),
             }
         })
         .await
-        .map_err(|_| anyhow!("send operation timed out"))?
+        .map_err(|_| anyhow!("send operation timed out"))?;
+
+        if result.is_err() {
+            self.maybe_refresh_metadata().await;
+        }
+
+        result
     }
 }
 

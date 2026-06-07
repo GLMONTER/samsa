@@ -14,35 +14,9 @@ use crate::{error::Result, metadata::ClusterMetadata, DEFAULT_CLIENT_ID};
 
 const DEFAULT_MAX_BATCH_SIZE: usize = 100;
 const DEFAULT_BATCH_TIMEOUT_MS: u64 = 1000;
+const DEFAULT_METADATA_REFRESH_INTERVAL: Duration = Duration::from_secs(300);
+const DEFAULT_MIN_METADATA_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
-/// Configure a [`Producer`].
-///
-/// ### Example
-/// ```rust
-/// let bootstrap_addrs = vec!["127.0.0.1:9092".to_string()];
-/// let topic_name = "my-topic";
-/// let partition_id = 0;
-///
-/// let message = samsa::prelude::ProduceMessage {
-///         topic: topic_name.to_string(),
-///         partition_id,
-///         key: Some(bytes::Bytes::from_static(b"Tester")),
-///         value: Some(bytes::Bytes::from_static(b"Value")),
-///         headers: vec![String::from("Key"), bytes::Bytes::from("Value")]
-///     };
-///
-/// let producer_client = samsa::prelude::ProducerBuilder::new(bootstrap_addrs, vec![topic_name.to_string()])
-///     .await?
-///     .batch_timeout_ms(1)
-///     .max_batch_size(2)
-///     .clone()
-///     .build()
-///     .await;
-///
-/// producer_client
-///     .produce(message)
-///     .await;
-/// ```
 #[derive(Clone)]
 pub struct ProducerBuilder<T: BrokerConnection> {
     cluster_metadata: ClusterMetadata<T>,
@@ -50,13 +24,20 @@ pub struct ProducerBuilder<T: BrokerConnection> {
     max_batch_size: usize,
     batch_timeout_ms: u64,
     attributes: Attributes,
+    /// How often the background task proactively refreshes cluster metadata
+    /// even when there are no errors. Keeps partition leader info fresh across
+    /// broker restarts. Default: 5 minutes.
+    metadata_refresh_interval: Duration,
+    /// Minimum time between error-triggered metadata refreshes. Prevents an
+    /// error storm from opening a flood of new TLS connections to every broker.
+    /// Default: 5 seconds.
+    min_metadata_refresh_interval: Duration,
 }
 
 impl<T> ProducerBuilder<T>
 where
     T: BrokerConnection + Clone + Debug + Send + Sync + 'static,
 {
-    /// Start a producer builder. To complete, use the [`build`](Self::build) method.
     pub async fn new(connection_params: T::ConnConfig, topics: Vec<String>) -> Result<Self> {
         let cluster_metadata = ClusterMetadata::new(
             connection_params,
@@ -72,6 +53,8 @@ where
             max_batch_size: DEFAULT_MAX_BATCH_SIZE,
             batch_timeout_ms: DEFAULT_BATCH_TIMEOUT_MS,
             attributes: Attributes::new(None),
+            metadata_refresh_interval: DEFAULT_METADATA_REFRESH_INTERVAL,
+            min_metadata_refresh_interval: DEFAULT_MIN_METADATA_REFRESH_INTERVAL,
         })
     }
 
@@ -126,12 +109,25 @@ where
         self
     }
 
+    /// How often to proactively refresh cluster metadata in the background.
+    /// Lower values mean faster recovery after a broker restart at the cost of
+    /// more metadata fetches. Default: 5 minutes.
+    pub fn metadata_refresh_interval(&mut self, interval: Duration) -> &mut Self {
+        self.metadata_refresh_interval = interval;
+        self
+    }
+
+    /// Minimum time between error-triggered metadata refreshes. Prevents
+    /// sustained errors from hammering the broker with reconnects. Default: 5s.
+    pub fn min_metadata_refresh_interval(&mut self, interval: Duration) -> &mut Self {
+        self.min_metadata_refresh_interval = interval;
+        self
+    }
+
     pub async fn build(self) -> Producer {
         let (input_sender, input_receiver) = channel(self.max_batch_size);
-        // unbounded because you don't want to force the reading.
         let (output_sender, output_receiver) = unbounded_channel();
 
-        // we should make this chunks timeout optional
         let produce_stream = into_produce_stream(input_receiver).chunks_timeout(
             self.max_batch_size,
             Duration::from_millis(self.batch_timeout_ms),
@@ -143,6 +139,8 @@ where
             self.cluster_metadata,
             self.produce_params,
             self.attributes,
+            self.metadata_refresh_interval,
+            self.min_metadata_refresh_interval,
         ));
 
         Producer {
@@ -155,7 +153,6 @@ where
         self,
         stream: impl Stream<Item = Vec<ProduceMessage>> + std::marker::Send + 'static,
     ) -> impl Stream<Item = Vec<Option<ProduceResponse>>> {
-        // unbounded because you don't want to force the reading.
         let (output_sender, mut output_receiver) = unbounded_channel();
 
         tokio::spawn(producer(
@@ -164,6 +161,8 @@ where
             self.cluster_metadata,
             self.produce_params,
             self.attributes,
+            self.metadata_refresh_interval,
+            self.min_metadata_refresh_interval,
         ));
 
         async_stream::stream! {
@@ -187,14 +186,55 @@ fn into_produce_stream(
 async fn producer<T: BrokerConnection + Clone + Debug + Send + 'static>(
     stream: impl Stream<Item = Vec<ProduceMessage>> + Send + 'static,
     output_sender: UnboundedSender<Vec<Option<ProduceResponse>>>,
-    cluster_metadata: ClusterMetadata<T>,
+    mut cluster_metadata: ClusterMetadata<T>,
     produce_params: ProduceParams,
     attributes: Attributes,
+    metadata_refresh_interval: Duration,
+    min_metadata_refresh_interval: Duration,
 ) {
     tokio::pin!(stream);
 
+    let mut metadata_refresh_ticker = tokio::time::interval(metadata_refresh_interval);
+    metadata_refresh_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Don't refresh immediately on start — we just fetched metadata in new()
+    metadata_refresh_ticker.reset();
+
+    let mut last_error_refresh = std::time::Instant::now()
+        .checked_sub(min_metadata_refresh_interval * 2)
+        .unwrap_or(std::time::Instant::now());
+
     loop {
         tokio::select! {
+            _ = metadata_refresh_ticker.tick() => {
+                // Proactive background refresh — only syncs if topology changed,
+                // matching the behaviour in the fixed metadata.rs
+                if let Some((_id, conn)) = cluster_metadata.broker_connections.iter().next() {
+                    let conn_clone = conn.clone();
+                    let broker_ids_before: Vec<i32> =
+                        cluster_metadata.broker_connections.keys().copied().collect();
+
+                    match cluster_metadata.fetch(conn_clone).await {
+                        Err(e) => log::error!("background metadata refresh failed: {}", e),
+                        Ok(()) => {
+                            let broker_ids_after: Vec<i32> =
+                                cluster_metadata.brokers.iter().map(|b| b.node_id).collect();
+                            let topology_changed = broker_ids_after
+                                .iter()
+                                .any(|id| !broker_ids_before.contains(id))
+                                || broker_ids_before
+                                    .iter()
+                                    .any(|id| !broker_ids_after.contains(id));
+                            if topology_changed {
+                                log::info!("queue topology changed, resyncing connections");
+                                if let Err(e) = cluster_metadata.sync().await {
+                                    log::error!("failed to resync connections: {}", e);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             result = stream.next() => {
                 match result {
                     Some(messages) => {
@@ -208,6 +248,18 @@ async fn producer<T: BrokerConnection + Clone + Debug + Send + 'static>(
                         {
                             Err(err) => {
                                 log::error!("failed to produce message {:?}", err);
+                                //throttled error-triggered refresh
+                                if last_error_refresh.elapsed() >= min_metadata_refresh_interval {
+                                    last_error_refresh = std::time::Instant::now();
+                                    if let Some((_id, conn)) = cluster_metadata.broker_connections.iter().next() {
+                                        let conn_clone = conn.clone();
+                                        if let Err(e) = cluster_metadata.fetch(conn_clone).await {
+                                            log::error!("error-triggered metadata refresh failed: {}", e);
+                                        } else if let Err(e) = cluster_metadata.sync().await {
+                                            log::error!("error-triggered metadata sync failed: {}", e);
+                                        }
+                                    }
+                                }
                             }
                             Ok(r) => {
                                 if let Err(err) = output_sender.send(r) {
@@ -216,9 +268,7 @@ async fn producer<T: BrokerConnection + Clone + Debug + Send + 'static>(
                             }
                         }
                     }
-                    None => {
-                        break;
-                    }
+                    None => break,
                 }
             }
         }

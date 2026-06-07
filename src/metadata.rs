@@ -87,7 +87,6 @@ impl<'a, T: BrokerConnection + Clone + Debug + Send + 'static> ClusterMetadata<T
         Some(leader.node_id)
     }
 
-
     pub fn resolve_partition(
         &self,
         topic: &str,
@@ -118,28 +117,40 @@ impl<'a, T: BrokerConnection + Clone + Debug + Send + 'static> ClusterMetadata<T
             .collect();
 
         if partitions.is_empty() {
-            return Err(Error::NoLeaderForTopicPartition(
-                topic.to_string(),
-                -1,
-            ));
+            return Err(Error::NoLeaderForTopicPartition(topic.to_string(), -1));
         }
 
-        //round-robin fallback
         let idx = ROUND_ROBIN.fetch_add(1, Ordering::Relaxed) % partitions.len();
         Ok(partitions[idx])
     }
 
+    /// Sync broker connections.
     #[instrument(name = "metadata-sync", level = "debug")]
     pub async fn sync(&mut self) -> Result<()> {
         tracing::debug!("Syncing metadata");
 
+        //only connect to brokers we don't already have a connection for.
+        let brokers_needing_connection: Vec<(i32, BrokerAddress)> = self
+            .brokers
+            .iter()
+            .filter(|b| !self.broker_connections.contains_key(&b.node_id))
+            .filter_map(|b| b.addr().ok().map(|addr| (b.node_id, addr)))
+            .collect();
+
+        if brokers_needing_connection.is_empty() {
+            tracing::debug!("all broker connections already established, skipping sync");
+            return Ok(());
+        }
+
+        tracing::debug!(
+            "establishing connections to {} new brokers",
+            brokers_needing_connection.len()
+        );
+
         let mut set = tokio::task::JoinSet::new();
 
-        for broker in self.brokers.iter() {
-            let id = broker.node_id;
-            let addr = broker.addr()?;
+        for (id, addr) in brokers_needing_connection {
             let params = self.connection_params.clone();
-
             set.spawn(async move {
                 let conn = T::from_addr(params, addr).await;
                 (id, conn)
@@ -160,6 +171,11 @@ impl<'a, T: BrokerConnection + Clone + Debug + Send + 'static> ClusterMetadata<T
                 }
             }
         }
+
+        //also remove connections for brokers that are no longer in the cluster.
+        let current_broker_ids: Vec<i32> = self.brokers.iter().map(|b| b.node_id).collect();
+        self.broker_connections
+            .retain(|id, _| current_broker_ids.contains(id));
 
         if self.broker_connections.is_empty() {
             return Err(Error::IoError(std::io::ErrorKind::TimedOut));
@@ -192,7 +208,6 @@ impl<'a, T: BrokerConnection + Clone + Debug + Send + 'static> ClusterMetadata<T
         self.brokers = metadata_response.brokers;
         self.controller_id = metadata_response.controller_id;
 
-        // insert topic names into self.topic_names
         for topic in &metadata_response.topics {
             let vec = topic.name.to_vec();
             let name = String::from_utf8(vec).map_err(|_| Error::DecodingUtf8Error)?;
@@ -377,9 +392,7 @@ mod test {
     fn test_broker_by_id() {
         let cluster: ClusterMetadata<TcpConnection> = test_metadata!();
         let id = 1;
-
         let broker = cluster.get_broker_by_id(id);
-
         assert!(broker.is_some());
     }
 
@@ -388,7 +401,6 @@ mod test {
         let cluster: ClusterMetadata<TcpConnection> = test_metadata!();
         let id = 1;
         let partition = cluster.get_topic_partition_by_id("purchases", id);
-
         assert!(partition.is_some());
         assert_eq!(partition.unwrap().partition_index, id);
     }
@@ -413,14 +425,11 @@ mod test {
     #[test]
     fn test_partition_leader() {
         let cluster: ClusterMetadata<TcpConnection> = test_metadata!();
-
         let leader = cluster.get_leader_id_for_topic_partition("purchases", 1);
-
         assert!(leader.is_some());
         assert_eq!(leader.unwrap(), 1);
 
         let leader = cluster.get_leader_id_for_topic_partition("purchases", 0);
-
         assert!(leader.is_some());
         assert_eq!(leader.unwrap(), 2);
     }

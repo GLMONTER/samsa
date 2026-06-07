@@ -22,21 +22,6 @@ use super::sasl::do_sasl_v2;
 use super::sasl::SaslConfig;
 use super::{BrokerAddress, BrokerConnection};
 
-/// TLS connection to a Kafka/Redpanda broker.
-///
-/// # Example
-/// ```rust
-/// // set up connection options
-/// let tls_option = TlsConnectionOptions {
-///         broker_options: vec![BrokerAddress {
-///             host: "127.0.0.1".to_owned(),
-///             port: 9092,
-///         }],
-///         key: "/path_to_key_file".into(),
-///         cert: "/path_to_cert_file".into(),
-///         cafile: Some("/path_to_ca_file".into()),
-///     };
-/// ```
 #[derive(Clone, Debug)]
 pub struct TlsConnection {
     stream: Arc<Mutex<TlsStream<TcpStream>>>,
@@ -52,14 +37,6 @@ pub struct TlsConnectionOptions {
 }
 
 impl TlsConnection {
-    /// Connect to a Kafka/Redpanda broker
-    ///
-    /// ### Example
-    /// ```
-    /// // connect to a kafka/redpanda broker
-    /// let addrs = vec!["localhost:9092"];
-    /// let conn = samsa::prelude::BrokerConnection(addrs).await?;
-    /// ```
     pub async fn new_(options: TlsConnectionOptions) -> Result<Self> {
         tracing::debug!(
             "Starting connection to {} brokers",
@@ -80,7 +57,7 @@ impl TlsConnection {
         for broker_option in options.broker_options.iter() {
             let addr = (broker_option.host.as_str(), broker_option.port)
                 .to_socket_addrs()
-                .map_err(|e| crate::error::Error::IoError(ErrorKind::NotFound))?
+                .map_err(|_| crate::error::Error::IoError(ErrorKind::NotFound))?
                 .next()
                 .ok_or_else(|| crate::error::Error::IoError(ErrorKind::NotFound))?;
 
@@ -91,14 +68,12 @@ impl TlsConnection {
                 load_keys(&options.key).map_err(|e| crate::error::Error::IoError(e.kind()))?;
 
             let connection_result = tokio::time::timeout(Duration::from_secs(10), async {
-                // TCP connect
                 let tcp_stream = TcpStream::connect(addr)
                     .await
                     .map_err(|e| crate::error::Error::IoError(e.kind()))?;
 
                 tracing::debug!("connected on tcp");
 
-                // TLS setup
                 let config = rustls::ClientConfig::builder()
                     .with_root_certificates(root_cert_store.clone())
                     .with_client_auth_cert(certs, key)
@@ -109,7 +84,6 @@ impl TlsConnection {
                     .map_err(|_| crate::error::Error::IoError(ErrorKind::InvalidInput))?
                     .to_owned();
 
-                // TLS handshake
                 let stream = connector.connect(domain, tcp_stream).await.map_err(|e| {
                     if let Some(err) = e.source() {
                         log::error!("failed to connect to broker over TLS: {:?}", err);
@@ -147,25 +121,7 @@ impl TlsConnection {
         Err(crate::error::Error::IoError(ErrorKind::NotFound))
     }
 
-    /// Serialize a given request and send to Kafka/Redpanda broker.
-    ///
-    /// The Kafka protocol specifies that all requests will
-    /// be processed in the order they are sent and responses will return in
-    /// that order as well. Users of this method should be sure to use the receive_response method
-    /// to accept Kafka responses in the order that these requests are sent.
-    ///
-    /// This method is only useful in practice when used in combination with
-    /// a request type. To see how this would be done, visit the protocol module.
-    ///
-    /// ### Example
-    /// ```
-    /// // send an arbitrary set of bytes to kafka broker
-    /// let buf = "test";
-    /// conn.send_request(buf).await?;
-    /// ```
     pub async fn send_request_<R: ToByte + Send>(&mut self, req: &R) -> Result<()> {
-        // TODO: Does it make sense to find the capacity of the type
-        // and fill it here?
         let mut buffer = Vec::with_capacity(4);
 
         buffer.extend_from_slice(&[0, 0, 0, 0]);
@@ -191,23 +147,9 @@ impl TlsConnection {
         .await
         .map_err(|_| crate::error::Error::IoError(ErrorKind::TimedOut))?
     }
-    /// Receive a response in raw bytes from a Kafka/Redpanda broker.
-    ///
-    /// Kafka queues up responses on the socket as requests are sent by the client.
-    /// This method pulls 1 request off the socket at a time and returns the raw bytes.
-    ///
-    /// This method returns raw data that is not useful until parsed
-    /// into a response type. To see how this would be done, visit the
-    /// protocol module.
-    ///
-    /// ### Example
-    /// ```
-    /// // receive a message from a kafka broker
-    /// let response_bytes = conn.receive_response().await?;
-    /// ```
+
     pub async fn receive_response_(&mut self) -> Result<BytesMut> {
         tokio::time::timeout(Duration::from_secs(10), async {
-            // figure out the message size
             let mut stream = self.stream.lock().await;
 
             let length = stream
@@ -245,6 +187,7 @@ fn load_keys(path: &std::path::Path) -> io::Result<PrivateKeyDer<'static>> {
             .map(Into::into),
     }
 }
+
 #[async_trait]
 impl BrokerConnection for TlsConnection {
     type ConnConfig = TlsConnectionOptions;
@@ -275,34 +218,12 @@ impl BrokerConnection for TlsConnection {
     }
 }
 
-/// SASL/TLS connection options.
 #[derive(Clone, Debug)]
 pub struct SaslTlsConfig {
     pub tls_config: TlsConnectionOptions,
     pub sasl_config: SaslConfig,
 }
 
-/// SASL/TLS connection to a Kafka/Redpanda broker.
-///
-/// # Example
-/// ```rust
-/// let tls_config = TlsConnectionOptions {
-///     broker_options: vec![BrokerAddress {
-///         host: "127.0.0.1".to_owned(),
-///         port: 9092,
-///     }],
-///     key: "/path_to_key_file".into(),
-///     cert: "/path_to_cert_file".into(),
-///     cafile: Some("/path_to_ca_file".into()),
-/// };
-///
-/// let sasl_config = SaslConfig::new(String::from("myuser"), String::from("pass1234"), None, None);
-///
-/// let options = SaslTlsConfig {
-///     tls_config,
-///     sasl_config,
-/// };
-/// ```
 #[derive(Clone, Debug)]
 pub struct SaslTlsConnection {
     tls_conn: TlsConnection,
@@ -320,7 +241,6 @@ impl BrokerConnection for SaslTlsConnection {
         self.tls_conn.receive_response_().await
     }
 
-    /// Connect to a Kafka/Redpanda broker
     async fn new(p: Self::ConnConfig) -> Result<Self> {
         let conn = do_sasl_v2(
             async || TlsConnection::new_(p.tls_config.clone()).await,
@@ -341,6 +261,6 @@ impl BrokerConnection for SaslTlsConnection {
             tls_config: options,
             ..p
         };
-        return Self::new(tc).await;
+        Self::new(tc).await
     }
 }
