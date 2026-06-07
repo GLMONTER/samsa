@@ -20,8 +20,7 @@ use crate::{
     error::{Error, Result},
 };
 
-use super::sasl::{do_sasl_v2, SaslConfig};
-use super::{BrokerAddress, BrokerConnection};
+use super::{load_certs, load_keys, BrokerAddress, BrokerConnection};
 
 /// HTTP proxy configuration
 #[derive(Clone, Debug)]
@@ -384,115 +383,4 @@ async fn connect_through_proxy(proxy: &ProxyConfig, target: &BrokerAddress) -> R
         target.port
     );
     Ok(stream)
-}
-
-// SASL variants — unchanged structurally, just wired to the fixed connection types above
-
-#[derive(Clone, Debug)]
-pub struct SaslProxyTcpConfig {
-    pub proxy_config: ProxyTcpConfig,
-    pub sasl_config: SaslConfig,
-}
-
-#[derive(Clone, Debug)]
-pub struct SaslProxyTcpConnection {
-    conn: ProxyTcpConnection,
-}
-
-#[async_trait]
-impl BrokerConnection for SaslProxyTcpConnection {
-    type ConnConfig = SaslProxyTcpConfig;
-
-    async fn send_request<R: ToByte + Sync + Send>(&mut self, req: &R) -> Result<()> {
-        self.conn.send_request_(req).await
-    }
-
-    async fn receive_response(&mut self) -> Result<BytesMut> {
-        self.conn.receive_response_().await
-    }
-
-    async fn new(p: Self::ConnConfig) -> Result<Self> {
-        let conn = do_sasl_v2(
-            async || ProxyTcpConnection::new_(p.proxy_config.clone()).await,
-            p.sasl_config.correlation_id,
-            &p.sasl_config.client_id,
-            p.sasl_config.clone(),
-        )
-        .await?;
-        Ok(Self { conn })
-    }
-
-    async fn from_addr(p: Self::ConnConfig, addr: BrokerAddress) -> Result<Self> {
-        Self::new(SaslProxyTcpConfig {
-            proxy_config: ProxyTcpConfig {
-                broker_options: vec![addr],
-                proxy: p.proxy_config.proxy,
-            },
-            sasl_config: p.sasl_config,
-        })
-        .await
-    }
-}
-
-/// SASL TLS connection through proxy
-#[derive(Clone, Debug)]
-pub struct SaslProxyTlsConfig {
-    pub proxy_tls_config: ProxyTlsConnectionOptions,
-    pub sasl_config: SaslConfig,
-}
-
-#[derive(Clone, Debug)]
-pub struct SaslProxyTlsConnection {
-    conn: ProxyTlsConnection,
-}
-
-#[async_trait]
-impl BrokerConnection for SaslProxyTlsConnection {
-    type ConnConfig = SaslProxyTlsConfig;
-
-    async fn send_request<R: ToByte + Sync + Send>(&mut self, req: &R) -> Result<()> {
-        self.conn.send_request_(req).await
-    }
-
-    async fn receive_response(&mut self) -> Result<BytesMut> {
-        self.conn.receive_response_().await
-    }
-
-    async fn new(p: Self::ConnConfig) -> Result<Self> {
-        let conn = do_sasl_v2(
-            async || ProxyTlsConnection::new_(p.proxy_tls_config.clone()).await,
-            p.sasl_config.correlation_id,
-            &p.sasl_config.client_id,
-            p.sasl_config.clone(),
-        )
-        .await?;
-        Ok(Self { conn })
-    }
-
-    async fn from_addr(p: Self::ConnConfig, addr: BrokerAddress) -> Result<Self> {
-        Self::new(SaslProxyTlsConfig {
-            proxy_tls_config: ProxyTlsConnectionOptions {
-                broker_options: vec![addr],
-                proxy: p.proxy_tls_config.proxy,
-                tls_config: p.proxy_tls_config.tls_config,
-            },
-            sasl_config: p.sasl_config,
-        })
-        .await
-    }
-}
-
-fn load_certs(path: &std::path::Path) -> io::Result<Vec<CertificateDer<'static>>> {
-    certs(&mut BufReader::new(File::open(path)?)).collect()
-}
-
-fn load_keys(path: &std::path::Path) -> io::Result<PrivateKeyDer<'static>> {
-    match rsa_private_keys(&mut BufReader::new(File::open(path)?)).next() {
-        Some(Ok(key)) => Ok(key.into()),
-        Some(Err(e)) => Err(e),
-        None => pkcs8_private_keys(&mut BufReader::new(File::open(path)?))
-            .next()
-            .unwrap()
-            .map(Into::into),
-    }
 }

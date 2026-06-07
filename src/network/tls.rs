@@ -1,16 +1,14 @@
 use async_trait::async_trait;
 use bytes::BytesMut;
-use rustls_pemfile::{certs, pkcs8_private_keys, rsa_private_keys};
-use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use std::error::Error;
 use std::fs::File;
 use std::io::BufReader;
 use std::io::ErrorKind;
 use std::io::ErrorKind::Other;
 use std::net::ToSocketAddrs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
-use std::{io, sync::Arc};
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
@@ -18,9 +16,7 @@ use tokio_rustls::{client::TlsStream, rustls, TlsConnector};
 
 use crate::{encode::ToByte, error::Result};
 
-use super::sasl::do_sasl_v2;
-use super::sasl::SaslConfig;
-use super::{BrokerAddress, BrokerConnection};
+use super::{load_certs, load_keys, BrokerAddress, BrokerConnection};
 
 #[derive(Clone, Debug)]
 pub struct TlsConnection {
@@ -173,21 +169,6 @@ impl TlsConnection {
     }
 }
 
-fn load_certs(path: &Path) -> io::Result<Vec<CertificateDer<'static>>> {
-    certs(&mut BufReader::new(File::open(path)?)).collect()
-}
-
-fn load_keys(path: &std::path::Path) -> io::Result<PrivateKeyDer<'static>> {
-    match rsa_private_keys(&mut BufReader::new(File::open(path)?)).next() {
-        Some(Ok(rsa_private_key)) => Ok(rsa_private_key.into()),
-        Some(Err(e)) => Err(e),
-        None => pkcs8_private_keys(&mut BufReader::new(File::open(path)?))
-            .next()
-            .unwrap()
-            .map(Into::into),
-    }
-}
-
 #[async_trait]
 impl BrokerConnection for TlsConnection {
     type ConnConfig = TlsConnectionOptions;
@@ -215,52 +196,5 @@ impl BrokerConnection for TlsConnection {
         };
 
         Self::new_(options).await
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct SaslTlsConfig {
-    pub tls_config: TlsConnectionOptions,
-    pub sasl_config: SaslConfig,
-}
-
-#[derive(Clone, Debug)]
-pub struct SaslTlsConnection {
-    tls_conn: TlsConnection,
-}
-
-#[async_trait]
-impl BrokerConnection for SaslTlsConnection {
-    type ConnConfig = SaslTlsConfig;
-
-    async fn send_request<R: ToByte + Sync + Send>(&mut self, req: &R) -> Result<()> {
-        self.tls_conn.send_request_(req).await
-    }
-
-    async fn receive_response(&mut self) -> Result<BytesMut> {
-        self.tls_conn.receive_response_().await
-    }
-
-    async fn new(p: Self::ConnConfig) -> Result<Self> {
-        let conn = do_sasl_v2(
-            async || TlsConnection::new_(p.tls_config.clone()).await,
-            p.sasl_config.correlation_id,
-            &p.sasl_config.client_id,
-            p.sasl_config.clone(),
-        )
-        .await?;
-        Ok(Self { tls_conn: conn })
-    }
-
-    async fn from_addr(p: Self::ConnConfig, addr: BrokerAddress) -> Result<Self> {
-        let options = TlsConnectionOptions {
-            broker_options: vec![addr],
-            ..p.tls_config
-        };
-        let tc = Self::ConnConfig {
-            tls_config: options,
-            ..p
-        };
-        Self::new(tc).await
     }
 }

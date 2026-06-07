@@ -36,14 +36,17 @@
 //! disconnected.
 //!
 use std::fmt::Debug;
-
+use std::fs::File;
+use std::io;
+use std::io::BufReader;
+use std::path::Path;
 use crate::prelude::{encode::ToByte, Result};
 use async_trait::async_trait;
 use bytes::BytesMut;
+use rustls_pemfile::{certs, pkcs8_private_keys, rsa_private_keys};
+use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 
 pub mod proxy;
-pub mod sasl;
-pub mod tcp;
 pub mod tls;
 
 /// Address of a broker
@@ -86,4 +89,19 @@ pub trait BrokerConnection: Send + 'static {
     async fn from_addr(p: Self::ConnConfig, addr: BrokerAddress) -> Result<Self>
     where
         Self: Sized;
+}
+
+pub(crate) fn load_certs(path: &Path) -> io::Result<Vec<CertificateDer<'static>>> {
+    certs(&mut BufReader::new(File::open(path)?)).collect()
+}
+
+pub(crate) fn load_keys(path: &Path) -> io::Result<PrivateKeyDer<'static>> {
+    match rsa_private_keys(&mut BufReader::new(File::open(path)?)).next() {
+        Some(Ok(rsa_private_key)) => Ok(rsa_private_key.into()),
+        Some(Err(e)) => Err(e),
+        None => pkcs8_private_keys(&mut BufReader::new(File::open(path)?))
+            .next()
+            .unwrap()
+            .map(Into::into),
+    }
 }

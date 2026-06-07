@@ -31,8 +31,6 @@ pub enum Error {
     NotFound,
     MissingBrokerConfigOptions,
     IncorrectConnectionUsage,
-    InvalidSaslMechanism,
-    SaslAuthFailed(String),
     TaskCancelled(String),
 }
 
@@ -153,18 +151,12 @@ pub enum KafkaCode {
     ClusterAuthorizationFailed = 31,
     /// The timestamp of the message is out of acceptable range.
     InvalidTimestamp = 32,
-    /// The broker does not support the requested SASL mechanism.
-    UnsupportedSaslMechanism = 33,
-    /// Request is not valid given the current SASL state.
-    IllegalSaslState = 34,
     /// The version of API is not supported.
     UnsupportedVersion = 35,
     /// Topic with this name already exists.
     TopicAlreadyExists = 36,
     /// This is not the correct controller for this cluster.
     NotController = 41,
-    /// SASL Authentication failed.
-    SaslAuthenticationFailed = 58,
 }
 
 #[cfg(feature = "redpanda")]
